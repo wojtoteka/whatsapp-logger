@@ -1,4 +1,4 @@
-// WhatsApp Logger – punkt startowy
+// WhatsApp Logger - punkt startowy
 // Uruchom: node index.js
 // Przy pierwszym uruchomieniu zeskanuj kod QR w WhatsApp > Urządzenia połączone
 
@@ -37,7 +37,7 @@ function findChromePath() {
     for (const p of candidates) {
         if (p && fs.existsSync(p)) return p;
     }
-    // Jeśli żadnej nie znaleziono – niech puppeteer sam zdecyduje (może mieć własną)
+    // Jeśli żadnej nie znaleziono - niech puppeteer sam zdecyduje (może mieć własną)
     return undefined;
 }
 
@@ -45,7 +45,7 @@ const chromePath = findChromePath();
 if (chromePath) {
     console.log(`Używam przeglądarki: ${chromePath}`);
 } else {
-    console.warn('Nie znaleziono Chrome/Chromium – puppeteer użyje domyślnej przeglądarki (może być wymagana instalacja).');
+    console.warn('Nie znaleziono Chrome/Chromium - puppeteer użyje domyślnej przeglądarki (może być wymagana instalacja).');
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -72,9 +72,9 @@ if (chromePath) {
 }
 
 const client = new Client({
-    // Sesja zapisywana lokalnie – nie trzeba skanować QR po każdym uruchomieniu
+    // Sesja zapisywana lokalnie - nie trzeba skanować QR po każdym uruchomieniu
     authStrategy: new LocalAuth({ dataPath: './.wwebjs_auth' }),
-    // Nie rozgłaszaj statusu "online" przy połączeniu – mniejsza widoczność dla rozmówców
+    // Nie rozgłaszaj statusu "online" przy połączeniu - mniejsza widoczność dla rozmówców
     markOnlineOnConnect: false,
     puppeteer: puppeteerConfig,
 });
@@ -93,7 +93,7 @@ client.on('qr', (qr) => {
 });
 
 client.on('loading_screen', (percent, message) => {
-    process.stdout.write(`\rŁadowanie: ${percent}% – ${message}          `);
+    process.stdout.write(`\rŁadowanie: ${percent}% - ${message}          `);
     if (percent === 100) process.stdout.write('\n');
 });
 
@@ -109,7 +109,7 @@ client.on('auth_failure', async (msg) => {
 });
 
 client.on('ready', () => {
-    console.log('✓ WhatsApp Logger uruchomiony – monitoruję wiadomości...\n');
+    console.log('✓ WhatsApp Logger uruchomiony - monitoruję wiadomości...\n');
     discord.notifyReady().catch(() => {});
 });
 
@@ -138,23 +138,23 @@ client.on('message_create', async (message) => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Usunięte wiadomości – zachowujemy treść zanim zniknie
+//  Usunięte wiadomości - zachowujemy treść zanim zniknie
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Usunięcie "dla wszystkich" – mamy wersję 'before' (oryginał)
+// Usunięcie "dla wszystkich" - mamy wersję 'before' (oryginał)
 client.on('message_revoke_everyone', async (_after, before) => {
     if (before) {
         await storage.markDeleted(before);
     }
 });
 
-// Usunięcie "dla mnie" – mamy oryginalną wiadomość
+// Usunięcie "dla mnie" - mamy oryginalną wiadomość
 client.on('message_revoke_me', async (message) => {
     await storage.markDeleted(message);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-//  Graceful shutdown – zapisz oczekujące wiadomości przed wyjściem
+//  Graceful shutdown - zapisz oczekujące wiadomości przed wyjściem
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function shutdown() {

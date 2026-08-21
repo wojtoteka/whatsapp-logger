@@ -15,7 +15,7 @@ class Storage {
     }
 
     // ─────────────────────────────────────────────────────────────
-    //  Główna metoda – zapis wiadomości
+    //  Główna metoda - zapis wiadomości
     // ─────────────────────────────────────────────────────────────
 
     async saveMessage(client, message) {
@@ -37,7 +37,7 @@ class Storage {
 
             const chat = await message.getChat();
             if (!chat || !chat.id) {
-                console.warn('Pominięto wiadomość – brak obiektu czatu');
+                console.warn('Pominięto wiadomość - brak obiektu czatu');
                 return;
             }
             
@@ -104,7 +104,7 @@ class Storage {
             state.pendingMessages.push(msgData);
             state.totalMessages++;
 
-            // Jeśli partia pełna – zrzuć do HTML
+            // Jeśli partia pełna - zrzuć do HTML
             if (state.pendingMessages.length >= config.MESSAGES_PER_FILE) {
                 await this._flushBatch(chatId);
             } else {
@@ -123,7 +123,7 @@ class Storage {
                 const stackLine = err.stack.split('\n')[1]?.trim();
                 if (stackLine) console.error('  →', stackLine);
             }
-            // Nieznany typ wiadomości – loguj do pliku aby można było zbadać
+            // Nieznany typ wiadomości - loguj do pliku aby można było zbadać
             if (err.message.includes('description') || err.message.includes('undefined')) {
                 try {
                     const debugInfo = {
@@ -159,11 +159,11 @@ class Storage {
             if (found) {
                 found.isDeleted = true;
                 await this._saveStateJson(chatId);
-                console.log(`[Usunięta – zachowana] ${found.from}: ${found.body.substring(0, 60)}`);
+                console.log(`[Usunięta - zachowana] ${found.from}: ${found.body.substring(0, 60)}`);
                 return;
             }
         }
-        // Wiadomość mogła już trafić do zapisanego pliku HTML –
+        // Wiadomość mogła już trafić do zapisanego pliku HTML -
         // zapisujemy identyfikator, żeby był dostępny do ewentualnego przyszłego przetwarzania.
         await this._logDeletedId(msgId);
     }
@@ -255,7 +255,7 @@ class Storage {
             const sizeBytes = (media.data.length * 3) / 4;
             const sizeMB    = sizeBytes / (1024 * 1024);
             if (sizeMB > config.MAX_MEDIA_SIZE_MB) {
-                console.log(`Pominięto plik – za duży: ${sizeMB.toFixed(1)} MB (limit: ${config.MAX_MEDIA_SIZE_MB} MB)`);
+                console.log(`Pominięto plik - za duży: ${sizeMB.toFixed(1)} MB (limit: ${config.MAX_MEDIA_SIZE_MB} MB)`);
                 return null;
             }
 
@@ -268,7 +268,7 @@ class Storage {
 
             await fs.writeFile(absPath, Buffer.from(media.data, 'base64'));
 
-            // Zwróć ścieżkę względną (od folderu czatu) – do użycia w HTML
+            // Zwróć ścieżkę względną (od folderu czatu) - do użycia w HTML
             return path.relative(state.chatDir, absPath);
         } catch (err) {
             console.error('Błąd pobierania mediów:', err.message);

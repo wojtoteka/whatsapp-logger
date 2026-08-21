@@ -96,7 +96,7 @@ function renderMessage(msg) {
     if (msg.body) {
         bodyHtml = `<div class="body">${escapeHtml(msg.body)}</div>`;
     }
-    // Baner skasowania – dołączany na dole bąbelka
+    // Baner skasowania - dołączany na dole bąbelka
     const deletedBanner = isDeleted
         ? `<div class="deleted-banner">🗑 Wiadomość skasowana</div>`
         : '';
@@ -162,12 +162,12 @@ function renderMessages(messages) {
 }
 
 /**
- * Główna funkcja – generuje kompletny plik HTML z partią wiadomości.
+ * Główna funkcja - generuje kompletny plik HTML z partią wiadomości.
  */
 function generateHtml({ chatName, batchNum, messages, totalBatches }) {
     const messagesHtml = renderMessages(messages);
-    const startDate = messages.length > 0 ? formatTimestamp(messages[0].timestamp) : '–';
-    const endDate   = messages.length > 0 ? formatTimestamp(messages[messages.length - 1].timestamp) : '–';
+    const startDate = messages.length > 0 ? formatTimestamp(messages[0].timestamp) : '-';
+    const endDate   = messages.length > 0 ? formatTimestamp(messages[messages.length - 1].timestamp) : '-';
     const avatarLetter = escapeHtml((chatName || '?').charAt(0).toUpperCase());
 
     const padded = (n) => String(n).padStart(4, '0');
@@ -183,7 +183,7 @@ function generateHtml({ chatName, batchNum, messages, totalBatches }) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>${escapeHtml(chatName)} – Część ${batchNum}</title>
+    <title>${escapeHtml(chatName)} - Część ${batchNum}</title>
     <style>
         *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -397,7 +397,7 @@ function generateHtml({ chatName, batchNum, messages, totalBatches }) {
         <div class="chat-avatar">${avatarLetter}</div>
         <div class="chat-info">
             <h1>${escapeHtml(chatName)}</h1>
-            <p>Część ${batchNum} &nbsp;•&nbsp; ${startDate} – ${endDate} &nbsp;•&nbsp; ${messages.length} wiadomości</p>
+            <p>Część ${batchNum} &nbsp;•&nbsp; ${startDate} - ${endDate} &nbsp;•&nbsp; ${messages.length} wiadomości</p>
         </div>
     </div>
 

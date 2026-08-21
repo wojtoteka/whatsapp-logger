@@ -1,5 +1,5 @@
 // Powiadomienia Discord przez Webhook
-// Nie wymaga żadnych dodatkowych bibliotek – używa wbudowanego modułu https
+// Nie wymaga żadnych dodatkowych bibliotek - używa wbudowanego modułu https
 
 'use strict';
 
@@ -8,7 +8,7 @@ const fs    = require('fs');
 const path  = require('path');
 const config = require('./config');
 
-// Cooldown zapisywany na dysk – przeżywa restarty PM2
+// Cooldown zapisywany na dysk - przeżywa restarty PM2
 // Każda kategoria ma NIEZALEŻNY cooldown (1 powiadomienie na kategorię)
 const COOLDOWN_MS    = 5 * 60 * 1000; // 5 minut
 const COOLDOWN_FILE  = path.resolve(__dirname, '../.discord_cooldown.json');
@@ -43,8 +43,8 @@ function markSent(category) {
 /**
  * Wysyła wiadomość embed na Discord Webhook.
  * ping=true dodaje wzmiankę użytkownika z DISCORD_PING_USER_ID.
- * category – klucz cooldownu, NIEZALEŻNY dla każdego typu alertu.
- * Jeśli DISCORD_WEBHOOK_URL nie jest ustawiony – cicho pomija.
+ * category - klucz cooldownu, NIEZALEŻNY dla każdego typu alertu.
+ * Jeśli DISCORD_WEBHOOK_URL nie jest ustawiony - cicho pomija.
  */
 async function notify(title, description, color = 0xff0000, ping = false, category = null) {
     const webhookUrl = config.DISCORD_WEBHOOK_URL;
@@ -53,7 +53,7 @@ async function notify(title, description, color = 0xff0000, ping = false, catego
     // Sprawdź cooldown (per kategoria, persisted na dysku)
     if (category) {
         if (!canSend(category)) {
-            console.log(`[Discord] Pomijam "${category}" – cooldown aktywny (5 min).`);
+            console.log(`[Discord] Pomijam "${category}" - cooldown aktywny (5 min).`);
             return;
         }
         markSent(category);
@@ -74,7 +74,7 @@ async function notify(title, description, color = 0xff0000, ping = false, catego
         }],
     };
 
-    // content nie może być pustym stringiem – usuń klucz jeśli brak pinga
+    // content nie może być pustym stringiem - usuń klucz jeśli brak pinga
     if (!body.content) delete body.content;
 
     const payload = JSON.stringify(body);
@@ -130,7 +130,7 @@ async function notify(title, description, color = 0xff0000, ping = false, catego
 /** Sesja wygasła / błąd autoryzacji */
 async function notifyAuthFailure(reason) {
     await notify(
-        '🔴 WhatsApp Logger – utrata autoryzacji',
+        '🔴 WhatsApp Logger - utrata autoryzacji',
         `Sesja wygasła lub wystąpił błąd uwierzytelnienia.\n\n` +
         `**Powód:** ${reason || 'nieznany'}\n\n` +
         `Zaloguj się ponownie: usuń folder \`.wwebjs_auth\` i uruchom \`node .\` żeby zeskanować nowy QR.`,
@@ -143,7 +143,7 @@ async function notifyAuthFailure(reason) {
 /** Rozłączenie z serwerami WhatsApp */
 async function notifyDisconnected(reason) {
     await notify(
-        '🟠 WhatsApp Logger – rozłączono',
+        '🟠 WhatsApp Logger - rozłączono',
         `Klient został rozłączony z serwerami WhatsApp.\n\n**Powód:** ${reason || 'nieznany'}`,
         0xf97316,
         false,
@@ -151,10 +151,10 @@ async function notifyDisconnected(reason) {
     );
 }
 
-/** Nowy QR – trzeba ponownie zeskanować */
+/** Nowy QR - trzeba ponownie zeskanować */
 async function notifyQrRequired() {
     await notify(
-        '🟡 WhatsApp Logger – wymagany QR',
+        '🟡 WhatsApp Logger - wymagany QR',
         `Sesja wygasła. Uruchom program lokalnie i zeskanuj nowy kod QR w WhatsApp → Urządzenia połączone.`,
         0xeab308,
         true,
@@ -165,7 +165,7 @@ async function notifyQrRequired() {
 /** Ponowne połączenie po rozłączeniu */
 async function notifyReady() {
     await notify(
-        '🟢 WhatsApp Logger – połączono',
+        '🟢 WhatsApp Logger - połączono',
         `Logger jest podłączony i monitoruje wiadomości.`,
         0x16a34a,
         false,

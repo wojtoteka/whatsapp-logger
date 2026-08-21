@@ -1,7 +1,7 @@
 // Konfiguracja WhatsApp Loggera
 //
 // Wartości wrażliwe (webhook, hasło do zablokowanych czatów) NIE są trzymane
-// w tym pliku. Nadpisz je w src/config.local.js – plik jest w .gitignore,
+// w tym pliku. Nadpisz je w src/config.local.js - plik jest w .gitignore,
 // więc zostaje wyłącznie na Twojej maszynie. Wzór: src/config.local.example.js
 // Alternatywnie możesz podać je przez zmienne środowiskowe (mają pierwszeństwo).
 
@@ -21,7 +21,7 @@ const defaults = {
 
     // Hasło do zablokowanych czatów WhatsApp (funkcja "Zablokowane czaty").
     // Uwaga: WhatsApp Web (a więc i ta biblioteka) ma dostęp do treści
-    // zablokowanych czatów po zalogowaniu – nie wymaga osobnej weryfikacji.
+    // zablokowanych czatów po zalogowaniu - nie wymaga osobnej weryfikacji.
     LOCKED_CHAT_PASSWORD: '',
 
     // URL webhooka Discord do powiadomień (błędy autoryzacji, rozłączenia).
@@ -33,7 +33,7 @@ const defaults = {
     DISCORD_PING_USER_ID: '',
 };
 
-// src/config.local.js jest opcjonalny – bez niego logger działa,
+// src/config.local.js jest opcjonalny - bez niego logger działa,
 // tyle że bez powiadomień na Discordzie.
 let local = {};
 try {
