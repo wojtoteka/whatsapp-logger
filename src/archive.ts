@@ -1,0 +1,1027 @@
+// Serce programu: zamiana wiadomości z WhatsAppa na pliki w archiwum.
+//
+// Każdy czat ma swój folder, w nim kolejne pliki messages_0001.html po
+// MESSAGES_PER_FILE wiadomości, podfolder media i _state.json z tym, co nie
+// zdążyło jeszcze wypełnić partii. Jeden czat obsługiwany jest po kolei
+// (kolejka promisów), więc dwie wiadomości nigdy nie wchodzą sobie w drogę.
+
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import type { Config } from './config';
+import type { Database } from './db';
+import { toMessageRow } from './db';
+import { AvatarStore } from './avatars';
+import {
+    batchDataName,
+    batchFileName,
+    generateHtml,
+    markDeletedInHtml,
+    NEXT_LINK_MARKER,
+    buildNextLink,
+    titleSwaps,
+    typeLabel,
+} from './html';
+import {
+    chatIdOf,
+    contactDisplayName,
+    IdentityResolver,
+    messageKey,
+    NAME_RETRY_MS,
+    placeholderName,
+} from './identity';
+import { log } from './log';
+import { MediaDownloader } from './media';
+import {
+    bareId,
+    isStatusChat,
+    isStatusMessage,
+    STATUS_DIR,
+    STATUS_SEEN_LIMIT,
+    statusAuthorId,
+    statusChatId,
+} from './statuses';
+import { NameTier } from './types';
+import type {
+    ArchivedMessage,
+    BatchFile,
+    ChatIndexEntry,
+    ChatStateFile,
+    LocationInfo,
+    PollInfo,
+    QuotedInfo,
+    VCardInfo,
+    WaClient,
+    WaContact,
+    WaMessage,
+} from './types';
+import {
+    ensureDir,
+    listDir,
+    listDirents,
+    move,
+    pathExists,
+    readJson,
+    readJsonSync,
+    safeFileName,
+    writeFileAtomic,
+    writeJsonAtomic,
+} from './util';
+
+/** Wiadomości systemowe, których nie ma sensu archiwizować. */
+const IGNORED_TYPES = new Set([
+    'e2e_notification',
+    'notification_template',
+    'call_log',
+    'gp2',
+    'broadcast_notification',
+    'protocol',
+]);
+
+interface ChatState {
+    id: string;
+    name: string;
+    nameTier: NameTier;
+    isStatus: boolean;
+    /** Nazwa folderu względem logs/. Dla relacji "Statusy/<autor>". */
+    safeName: string;
+    chatDir: string;
+    mediaDir: string;
+    batchNum: number;
+    totalMessages: number;
+    pending: ArchivedMessage[];
+    seenIds: string[];
+    saveTimer: NodeJS.Timeout | null;
+    lastSaveAt: number;
+    /** Identyfikator prosto z wiadomości, zwykle @lid. */
+    rawId: string | null;
+    nameRetryAt: number;
+    /** Ostatnia ścieżka zdjęcia zapisana do bazy - żeby nie pisać w kółko. */
+    lastAvatarPath: string | null;
+}
+
+export interface StatusSweepStats {
+    saved: number;
+    skipped: number;
+}
+
+export class Archive {
+    private readonly states = new Map<string, ChatState>();
+    private readonly queues = new Map<string, Promise<unknown>>();
+    /** Identyfikator z wiadomości → klucz, pod którym prowadzimy archiwum. */
+    private readonly aliases = new Map<string, string>();
+    private readonly index = new Map<string, ChatIndexEntry>();
+    private readonly indexFile: string;
+
+    private readonly identity: IdentityResolver;
+    private readonly media: MediaDownloader;
+    private readonly avatars: AvatarStore;
+
+    constructor(
+        private readonly config: Config,
+        private readonly client: WaClient,
+        /** Opcjonalna baza. Bez niej działa samo archiwum na dysku. */
+        private readonly db: Database | null = null,
+    ) {
+        this.indexFile = path.join(config.logsDir, '_czaty.json');
+        this.identity = new IdentityResolver(client);
+        this.media = new MediaDownloader(config);
+        this.avatars = new AvatarStore(config, client);
+        this.loadIndex();
+    }
+
+    /** Folder archiwum - potrzebny modułowi kasującemu stare pliki. */
+    get logsDir(): string {
+        return this.config.logsDir;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    //  Zapis wiadomości
+    // ─────────────────────────────────────────────────────────────────────
+
+    /**
+     * Główne wejście: bierze wiadomość z WhatsAppa i dopisuje ją do archiwum.
+     * Zwraca true, gdy faktycznie coś doszło - przegląd relacji liczy po tym,
+     * ile rzeczy było nowych.
+     */
+    async save(message: WaMessage, options: { forceStatus?: boolean } = {}): Promise<boolean> {
+        try {
+            if (IGNORED_TYPES.has(message.type)) return false;
+
+            const isStatus = options.forceStatus === true || isStatusMessage(message);
+            const rawId = isStatus ? statusAuthorId(message) : chatIdOf(message);
+            if (!rawId) {
+                log.debug('Pominięto wiadomość - nie da się ustalić czatu');
+                return false;
+            }
+
+            // Relacje i zwykła rozmowa tej samej osoby mają ten sam rawId,
+            // a dwa różne foldery - stąd osobny klucz w spisie skrótów.
+            const aliasKey = isStatus ? statusChatId(rawId) : rawId;
+            let chatId = this.aliases.get(aliasKey) ?? null;
+
+            if (!chatId) {
+                chatId = await this.resolveChatId(message, rawId, isStatus);
+                if (!chatId) return false;
+                this.aliases.set(aliasKey, chatId);
+            }
+
+            return await this.enqueue(chatId, () => this.process(message, chatId, rawId));
+        } catch (err) {
+            log.error('Błąd zapisu wiadomości', err, {
+                stage: 'save',
+                messageId: messageKey(message),
+                messageType: message.type,
+            });
+            return false;
+        }
+    }
+
+    /** Ustala klucz archiwum dla nowo widzianego czatu. */
+    private async resolveChatId(
+        message: WaMessage,
+        rawId: string,
+        isStatus: boolean,
+    ): Promise<string | null> {
+        // Własne relacje nie mają identyfikatora kontaktu - to zawsze "Ja".
+        if (isStatus && rawId === 'me') {
+            const chatId = statusChatId('me');
+            if (!this.states.has(chatId)) {
+                await this.initState(chatId, 'Ja', NameTier.SAVED, rawId);
+            }
+            return chatId;
+        }
+
+        const identity = await this.identity.resolve(message, rawId);
+        const baseId = identity?.id ?? rawId;
+        const chatId = isStatus ? statusChatId(baseId) : baseId;
+
+        if (!this.states.has(chatId)) {
+            await this.initState(
+                chatId,
+                identity?.name ?? placeholderName(rawId),
+                identity?.tier ?? NameTier.ID,
+                rawId,
+            );
+        }
+        return chatId;
+    }
+
+    /** Właściwe przetworzenie wiadomości - już w kolejce danego czatu. */
+    private async process(message: WaMessage, chatId: string, rawId: string): Promise<boolean> {
+        const state = this.states.get(chatId);
+        if (!state) return false;
+
+        const msgId = messageKey(message);
+
+        // Tę samą relację przegląd może podać drugi raz - nie dokładamy jej.
+        if (state.isStatus && msgId && state.seenIds.includes(msgId)) return false;
+
+        // Czat prowadzony pod samymi cyframi dostaje prawdziwą nazwę, gdy
+        // tylko ją poznamy - razem z folderem na dysku.
+        await this.maybeUpgradeName(message, state, rawId);
+
+        let senderName = 'Ja';
+        let avatar: string | null = null;
+
+        if (!message.fromMe) {
+            let contact: WaContact | null = null;
+            try {
+                contact = (await message.getContact()) as WaContact;
+            } catch {
+                // Zostanie sam numer; zdjęcie i tak spróbujemy pobrać.
+            }
+            senderName =
+                contactDisplayName(contact) ?? message.author ?? message.from ?? 'Nieznany';
+            avatar = await this.avatars.pathFor(contact, message, state.chatDir);
+        }
+
+        const media = await this.media.download(message, {
+            mediaDir: state.mediaDir,
+            chatDir: state.chatDir,
+            isStatus: state.isStatus,
+            label: state.name,
+        });
+
+        const entry: ArchivedMessage = {
+            id: msgId ?? `${state.id}-${message.timestamp}`,
+            timestamp: message.timestamp,
+            from: senderName,
+            fromMe: message.fromMe,
+            avatar,
+            // Uwaga: przy zdjęciach i filmach whatsapp-web.js wkłada podpis
+            // właśnie do body - osobnego pola z podpisem nie ma.
+            body: message.body || '',
+            type: message.type,
+            mediaPath: media.path,
+            mediaName: media.name,
+            mediaSkipped: media.skipped,
+            isDeleted: false,
+            isForwarded: message.isForwarded === true,
+            quotedMsg: await this.quotedInfo(message),
+            location: locationInfo(message),
+            contacts: vCardInfo(message),
+            poll: pollInfo(message),
+        };
+
+        state.pending.push(entry);
+        state.totalMessages++;
+
+        // Baza dostaje wiadomość od razu, nie dopiero przy zamknięciu partii -
+        // panel ma pokazywać rozmowę na bieżąco, a nie co 70 wiadomości.
+        const row = toMessageRow(entry, state.id, state.safeName);
+        await this.db?.saveMessage(row);
+
+        // Zdjęcie czatu w bazie aktualizujemy tylko wtedy, gdy faktycznie się
+        // zmieniło - inaczej byłby jeden UPDATE na każdą wiadomość.
+        if (row.avatarPath && row.avatarPath !== state.lastAvatarPath) {
+            state.lastAvatarPath = row.avatarPath;
+            await this.db?.setChatAvatar(state.id, row.avatarPath);
+        }
+
+        if (state.isStatus && msgId) {
+            state.seenIds.push(msgId);
+            if (state.seenIds.length > STATUS_SEEN_LIMIT) {
+                state.seenIds = state.seenIds.slice(-STATUS_SEEN_LIMIT);
+            }
+        }
+
+        if (state.pending.length >= this.config.messagesPerFile) {
+            await this.flushBatch(state);
+        } else if (state.isStatus) {
+            // Identyfikator relacji musi trafić na dysk od razu - po restarcie
+            // program nie zapisze jej drugi raz, nawet gdy padnie za chwilę.
+            await this.saveState(state);
+        } else {
+            await this.scheduleStateSave(state);
+        }
+
+        return true;
+    }
+
+    private async quotedInfo(message: WaMessage): Promise<QuotedInfo | null> {
+        if (!message.hasQuotedMsg) return null;
+        try {
+            const quoted = (await message.getQuotedMessage()) as WaMessage | null;
+            if (!quoted) return null;
+
+            let sender = 'Ja';
+            if (!quoted.fromMe) {
+                try {
+                    sender =
+                        contactDisplayName((await quoted.getContact()) as WaContact) ??
+                        quoted.author ??
+                        quoted.from ??
+                        'Nieznany';
+                } catch {
+                    sender = quoted.author ?? quoted.from ?? 'Nieznany';
+                }
+            }
+            return { sender, body: quoted.body || typeLabel(quoted.type) };
+        } catch {
+            return null;
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    //  Nazwa czatu i folder
+    // ─────────────────────────────────────────────────────────────────────
+
+    /**
+     * Czat założony pod cyframi z identyfikatora dostaje prawdziwą nazwę,
+     * gdy tylko ją poznamy. Nazwa profilu z przychodzącej wiadomości nic nie
+     * kosztuje, więc sprawdzamy ją zawsze; o kontakt i numer telefonu pytamy
+     * rzadziej, bo to zapytania do przeglądarki.
+     */
+    private async maybeUpgradeName(message: WaMessage, state: ChatState, rawId: string): Promise<void> {
+        if (state.nameTier >= NameTier.SAVED) return;
+
+        if (Date.now() - state.nameRetryAt < NAME_RETRY_MS) return;
+        state.nameRetryAt = Date.now();
+
+        const identity = await this.identity.resolve(message, state.rawId ?? rawId);
+        if (!identity) return;
+        if (identity.tier > state.nameTier && identity.name !== state.name) {
+            await this.renameChat(state, identity.name, identity.tier);
+        }
+    }
+
+    /**
+     * Przenosi folder czatu pod nową nazwę i poprawia nagłówki w zapisanych
+     * już plikach HTML. Odnośniki do mediów i zdjęć są względne, więc
+     * przeprowadzka ich nie rusza. Gdy folder o nowej nazwie już istnieje,
+     * nic nie ruszamy - scalanie dwóch archiwów to nie robota dla loggera.
+     */
+    private async renameChat(state: ChatState, newName: string, newTier: NameTier): Promise<void> {
+        const safeName = this.folderFor(state.id, newName);
+        const oldName = state.name;
+
+        if (safeName !== state.safeName) {
+            const newDir = path.join(this.config.logsDir, safeName);
+            if (await pathExists(newDir)) {
+                log.debug(
+                    `Czat ${state.id} to "${newName}", ale folder ${safeName} już istnieje - zostaję w ${state.safeName}`,
+                );
+                return;
+            }
+            try {
+                await move(state.chatDir, newDir);
+            } catch (err) {
+                log.error(`Nie udało się przenieść ${state.safeName} → ${safeName}`, err);
+                return;
+            }
+            state.safeName = safeName;
+            state.chatDir = newDir;
+            state.mediaDir = path.join(newDir, 'media');
+        }
+
+        state.name = newName;
+        state.nameTier = newTier;
+
+        log.info(`Czat "${oldName}" jest teraz "${newName}".`);
+
+        await this.retitleBatches(state, oldName, newName);
+        await this.rememberChat(state);
+        await this.saveState(state);
+    }
+
+    /** Podmiana nazwy czatu w nagłówkach zapisanych już partii HTML. */
+    private async retitleBatches(state: ChatState, oldName: string, newName: string): Promise<void> {
+        const swaps = titleSwaps(oldName, newName);
+        const files = (await listDir(state.chatDir)).filter((f) => /^messages_\d+\.html$/.test(f));
+
+        for (const file of files) {
+            const full = path.join(state.chatDir, file);
+            try {
+                const before = await readText(full);
+                if (before === null) continue;
+
+                let html = before;
+                for (const [from, to] of swaps) html = html.split(from).join(to);
+                if (html !== before) await writeFileAtomic(full, html);
+            } catch (err) {
+                log.error(`Nie udało się poprawić nagłówka w ${file}`, err);
+            }
+        }
+    }
+
+    /**
+     * Folder, w którym starsze wersje trzymały ten czat - nazwany samymi
+     * cyframi z identyfikatora. Szukamy go tylko wtedy, gdy czatu nie ma
+     * w spisie, żeby przy zmianie nazwy zabrać ze sobą to, co już zapisano.
+     */
+    private async findLegacyFolder(
+        chatId: string,
+        rawId: string | null,
+    ): Promise<ChatIndexEntry | null> {
+        for (const id of [bareId(chatId), rawId]) {
+            if (!id) continue;
+
+            const name = placeholderName(id);
+            const safeName = this.folderFor(chatId, name);
+            if (await pathExists(path.join(this.config.logsDir, safeName))) {
+                return { name, safeName, tier: NameTier.ID };
+            }
+        }
+        return null;
+    }
+
+    /** Nazwa folderu czatu. Relacje idą o poziom głębiej, do Statusy/. */
+    private folderFor(chatId: string, chatName: string): string {
+        const safe = safeFileName(chatName, bareId(chatId).replace(/[^a-zA-Z0-9_-]/g, '_'));
+        return isStatusChat(chatId) ? `${STATUS_DIR}/${safe}` : safe;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    //  Stan czatu
+    // ─────────────────────────────────────────────────────────────────────
+
+    private async initState(
+        chatId: string,
+        chatName: string,
+        chatTier: NameTier,
+        rawId: string | null,
+    ): Promise<void> {
+        // Archiwum tego czatu może już gdzieś leżeć - wtedy otwieramy je tam,
+        // gdzie jest, choćby nazwa z tego uruchomienia była inna. Lepszą
+        // nazwę wprowadzamy niżej, przenosinami, a nie drugim folderem.
+        const aliasKey = isStatusChat(chatId) && rawId ? statusChatId(rawId) : rawId;
+        const known = this.index.get(chatId) ?? (aliasKey ? this.index.get(aliasKey) : undefined);
+
+        const knownFolderExists =
+            known?.safeName !== undefined &&
+            (await pathExists(path.join(this.config.logsDir, known.safeName)));
+
+        // Spisu może nie być, a folder i tak leżeć na dysku - tak nazywały
+        // czaty starsze wersje programu, samymi cyframi z identyfikatora.
+        // Wchodzimy do niego, zamiast zostawiać w nim wiadomości sierotą.
+        const legacy = knownFolderExists ? null : await this.findLegacyFolder(chatId, rawId);
+
+        const adopted = knownFolderExists ? known : legacy;
+        const useName = adopted ? adopted.name : chatName;
+        const useTier = adopted ? (adopted.tier ?? NameTier.ID) : chatTier;
+        const safeName = adopted ? adopted.safeName : this.folderFor(chatId, useName);
+
+        const chatDir = path.join(this.config.logsDir, safeName);
+        const mediaDir = path.join(chatDir, 'media');
+        await ensureDir(chatDir);
+
+        const saved = await readJson<ChatStateFile>(path.join(chatDir, '_state.json'));
+
+        const state: ChatState = {
+            id: chatId,
+            name: useName,
+            nameTier: useTier,
+            isStatus: isStatusChat(chatId),
+            safeName,
+            chatDir,
+            mediaDir,
+            batchNum: saved?.batchNum ?? 1,
+            totalMessages: saved?.totalMessages ?? 0,
+            pending: Array.isArray(saved?.pendingMessages) ? saved.pendingMessages : [],
+            seenIds: Array.isArray(saved?.seenIds) ? saved.seenIds : [],
+            saveTimer: null,
+            lastSaveAt: 0,
+            rawId,
+            // Nazwę właśnie ustaliliśmy - nie ma po co pytać drugi raz przy
+            // tej samej wiadomości.
+            nameRetryAt: Date.now(),
+            lastAvatarPath: null,
+        };
+
+        this.states.set(chatId, state);
+        await this.rememberChat(state);
+
+        // Nazwa z tego uruchomienia jest lepsza niż zapamiętana - przenosimy.
+        // Gorszej nie przyjmujemy: raz zdobyty numer czy nazwisko nie ma
+        // wracać do cyfr @lid tylko dlatego, że WhatsApp dziś ich nie podał.
+        if (chatTier > useTier && chatName !== useName) {
+            await this.renameChat(state, chatName, chatTier);
+        }
+    }
+
+    /**
+     * Zapis _state.json nie częściej niż co STATE_SAVE_INTERVAL_MS.
+     * Chroni dysk przy ruchliwych grupach; partie HTML zapisują się niezależnie.
+     */
+    private async scheduleStateSave(state: ChatState): Promise<void> {
+        const interval = this.config.stateSaveIntervalMs;
+        const sinceLast = Date.now() - state.lastSaveAt;
+
+        // Zapis natychmiastowy musi się zdążyć wykonać, zanim wrócimy -
+        // inaczej mógłby się zderzyć z przenosinami folderu czatu.
+        if (interval <= 0 || sinceLast >= interval) {
+            await this.saveState(state);
+            return;
+        }
+        if (state.saveTimer) return;
+
+        state.saveTimer = setTimeout(() => {
+            state.saveTimer = null;
+            void this.enqueue(state.id, () => this.saveState(state));
+        }, interval - sinceLast);
+
+        // Oczekujący zapis nie może trzymać procesu przy życiu.
+        state.saveTimer.unref?.();
+    }
+
+    private async saveState(state: ChatState): Promise<void> {
+        if (state.saveTimer) {
+            clearTimeout(state.saveTimer);
+            state.saveTimer = null;
+        }
+        state.lastSaveAt = Date.now();
+
+        const data: ChatStateFile = {
+            chatName: state.name,
+            nameTier: state.nameTier,
+            batchNum: state.batchNum,
+            totalMessages: state.totalMessages,
+            pendingMessages: state.pending,
+            lastUpdated: new Date().toISOString(),
+        };
+        if (state.seenIds.length > 0) data.seenIds = state.seenIds;
+
+        try {
+            await writeJsonAtomic(path.join(state.chatDir, '_state.json'), data);
+        } catch (err) {
+            log.error(`Nie udało się zapisać stanu czatu "${state.name}"`, err);
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    //  Partie HTML
+    // ─────────────────────────────────────────────────────────────────────
+
+    private async flushBatch(state: ChatState): Promise<void> {
+        if (state.pending.length === 0) return;
+
+        const fileName = batchFileName(state.batchNum);
+        const html = generateHtml({
+            chatName: state.name,
+            batchNum: state.batchNum,
+            messages: state.pending,
+            // Ta partia jest w tej chwili najnowsza, więc odnośnik "dalej"
+            // zostaje wyszarzony. Odblokujemy go przy zapisie kolejnej.
+            isLatest: true,
+            messagesPerFile: this.config.messagesPerFile,
+            retentionNote: this.retentionNote(),
+        });
+
+        await writeFileAtomic(path.join(state.chatDir, fileName), html);
+
+        // Obok pliku HTML zapisujemy tę samą partię w JSON-ie. HTML jest do
+        // czytania, JSON do czytania maszynowo - panel nie musi rozbierać
+        // gotowej strony na części, żeby dobrać się do wiadomości.
+        await writeJsonAtomic(path.join(state.chatDir, batchDataName(state.batchNum)), {
+            chatName: state.name,
+            batchNum: state.batchNum,
+            savedAt: new Date().toISOString(),
+            messages: state.pending,
+        } satisfies BatchFile);
+
+        await this.unlockNextLink(state, state.batchNum - 1);
+
+        log.debug(`Zapisano ${state.safeName}/${fileName} (${state.pending.length} wiadomości)`);
+
+        state.batchNum++;
+        state.pending = [];
+        await this.saveState(state);
+    }
+
+    /**
+     * W poprzednim pliku odnośnik "dalej" był wyszarzony, bo kolejnej części
+     * jeszcze nie było. Teraz już jest, więc podmieniamy go na działający.
+     */
+    private async unlockNextLink(state: ChatState, batchNum: number): Promise<void> {
+        if (batchNum < 1) return;
+
+        const file = path.join(state.chatDir, batchFileName(batchNum));
+        try {
+            const html = await readText(file);
+            if (html === null || !html.includes(NEXT_LINK_MARKER.open)) return;
+
+            const pattern = new RegExp(
+                `${NEXT_LINK_MARKER.open}[\\s\\S]*?${NEXT_LINK_MARKER.close}`,
+                'g',
+            );
+            const replacement =
+                NEXT_LINK_MARKER.open + buildNextLink(batchNum + 1) + NEXT_LINK_MARKER.close;
+
+            await writeFileAtomic(file, html.replace(pattern, replacement));
+        } catch (err) {
+            log.error('Nie udało się odblokować odnośnika w poprzedniej części', err);
+        }
+    }
+
+    private retentionNote(): string {
+        return this.config.retentionEnabled && this.config.retentionDays > 0
+            ? `Starsze pliki kasują się po ${this.config.retentionDays} dniach.`
+            : 'Kasowanie starych plików jest wyłączone.';
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    //  Skasowane wiadomości
+    // ─────────────────────────────────────────────────────────────────────
+
+    /**
+     * Wiadomość skasowana w WhatsAppie zostaje w archiwum, tyle że z notką.
+     * Jeśli czeka jeszcze w partii - poprawiamy stan; jeśli trafiła już do
+     * pliku HTML - dopisujemy notkę wprost w nim.
+     */
+    async markDeleted(message: WaMessage | null): Promise<void> {
+        const msgId = messageKey(message);
+        if (!msgId) return;
+
+        for (const [chatId, state] of this.states) {
+            const pending = state.pending.find((m) => m.id === msgId);
+            if (!pending) continue;
+
+            await this.enqueue(chatId, async () => {
+                pending.isDeleted = true;
+                await this.saveState(state);
+                await this.db?.saveMessage(toMessageRow(pending, state.id, state.safeName));
+            });
+            log.info(`[skasowana - zachowana] ${pending.from}: ${pending.body.slice(0, 60)}`);
+            return;
+        }
+
+        await this.db?.markDeleted(msgId);
+
+        const patched = await this.patchDeletedInFiles(message, msgId);
+        if (!patched) await this.logDeletedId(msgId);
+    }
+
+    /** Szuka wiadomości w zapisanych plikach HTML i dopisuje w nich notkę. */
+    private async patchDeletedInFiles(message: WaMessage | null, msgId: string): Promise<boolean> {
+        const rawId = chatIdOf(message);
+        const chatId = rawId ? (this.aliases.get(rawId) ?? rawId) : null;
+        const state = chatId ? this.states.get(chatId) : null;
+
+        // Znany czat przeszukujemy od najnowszej partii - skasowana wiadomość
+        // prawie zawsze jest świeża. Nieznanego nie przeszukujemy w ogóle,
+        // bo oznaczałoby to czytanie całego archiwum przy każdym zdarzeniu.
+        const dirs = state ? [state.chatDir] : [];
+        for (const dir of dirs) {
+            const files = (await listDir(dir))
+                .filter((f) => /^messages_\d+\.html$/.test(f))
+                .sort()
+                .reverse();
+
+            for (const file of files) {
+                const full = path.join(dir, file);
+                const html = await readText(full);
+                if (html === null) continue;
+
+                const patched = markDeletedInHtml(html, msgId);
+                if (patched === null) continue;
+
+                await writeFileAtomic(full, patched);
+                log.info(`[skasowana - zachowana] oznaczono w ${path.basename(dir)}/${file}`);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private async logDeletedId(msgId: string): Promise<void> {
+        try {
+            await ensureDir(this.config.logsDir);
+            await fs.appendFile(
+                path.join(this.config.logsDir, '_skasowane.log'),
+                `${new Date().toISOString()} ${msgId}\n`,
+                'utf8',
+            );
+        } catch {
+            // Sam identyfikator to tylko ślad diagnostyczny.
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    //  Relacje
+    // ─────────────────────────────────────────────────────────────────────
+
+    /**
+     * Dociąga relacje, które WhatsApp ma jeszcze u siebie, a których nie ma
+     * w archiwum - te z czasu, gdy program był wyłączony. Relacja żyje dobę,
+     * więc co przepadło, to przepadło; bierzemy wszystko, co widać.
+     */
+    async sweepStatuses(): Promise<StatusSweepStats> {
+        const stats: StatusSweepStats = { saved: 0, skipped: 0 };
+        if (!this.config.saveStatuses) return stats;
+        if (typeof this.client.getBroadcasts !== 'function') return stats;
+
+        let broadcasts;
+        try {
+            broadcasts = (await this.client.getBroadcasts()) ?? [];
+        } catch (err) {
+            log.error('Nie udało się pobrać listy relacji', err, { stage: 'getBroadcasts' });
+            return stats;
+        }
+
+        for (const broadcast of broadcasts) {
+            for (const raw of broadcast?.msgs ?? []) {
+                const message = raw as WaMessage;
+                if (this.statusAlreadySaved(message)) {
+                    stats.skipped++;
+                    continue;
+                }
+                try {
+                    if (await this.save(message, { forceStatus: true })) stats.saved++;
+                    else stats.skipped++;
+                } catch (err) {
+                    log.quiet(err, {
+                        stage: 'relacja z przeglądu',
+                        messageId: messageKey(message),
+                    });
+                }
+            }
+        }
+        return stats;
+    }
+
+    /**
+     * Czy tę relację mamy już w archiwum. Patrzymy na stan w pamięci, a gdy
+     * czat nie jest jeszcze otwarty - wprost w jego _state.json na dysku.
+     */
+    private statusAlreadySaved(message: WaMessage): boolean {
+        const author = statusAuthorId(message);
+        const msgId = messageKey(message);
+        if (!author || !msgId) return false;
+
+        const chatId = statusChatId(author);
+        const state = this.states.get(chatId);
+        if (state) return state.seenIds.includes(msgId);
+
+        const known = this.index.get(chatId);
+        if (!known?.safeName) return false;
+
+        const saved = readJsonSync<ChatStateFile>(
+            path.join(this.config.logsDir, known.safeName, '_state.json'),
+        );
+        return Array.isArray(saved?.seenIds) && saved.seenIds.includes(msgId);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    //  Zdjęcia profilowe
+    // ─────────────────────────────────────────────────────────────────────
+
+    /**
+     * Przegląd zdjęć profilowych. Identyfikatory bierzemy ze spisu czatów,
+     * po jednym na folder - numer telefonu ma pierwszeństwo przed @lid,
+     * bo serwer częściej oddaje dla niego zdjęcie.
+     */
+    async refreshAvatars(): Promise<{ checked: number; changed: number }> {
+        const perFolder = new Map<string, string>();
+
+        for (const [key, entry] of this.index) {
+            const id = bareId(key);
+            if (!id || id === 'me') continue;
+
+            const current = perFolder.get(entry.safeName);
+            if (!current || (current.endsWith('@lid') && !id.endsWith('@lid'))) {
+                perFolder.set(entry.safeName, id);
+            }
+        }
+        return this.avatars.refreshAll(perFolder.values());
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    //  Kasowanie starych wiadomości oczekujących
+    // ─────────────────────────────────────────────────────────────────────
+
+    /**
+     * Wyrzuca z bieżących partii wiadomości starsze niż podana liczba dni.
+     * Bez tego w cichym czacie wiadomość mogłaby czekać w _state.json latami.
+     */
+    async pruneOldPending(days: number): Promise<number> {
+        if (!days || days <= 0) return 0;
+
+        const cutoff = Math.floor(Date.now() / 1000) - days * 24 * 60 * 60;
+        let removed = 0;
+        const handled = new Set<string>();
+
+        for (const [chatId, state] of [...this.states]) {
+            await this.enqueue(chatId, async () => {
+                handled.add(path.resolve(state.chatDir, '_state.json').toLowerCase());
+
+                const before = state.pending.length;
+                state.pending = state.pending.filter((m) => m.timestamp >= cutoff);
+                const diff = before - state.pending.length;
+                if (diff > 0) {
+                    removed += diff;
+                    await this.saveState(state);
+                }
+            });
+        }
+
+        // Ciche czaty nie mają stanu w pamięci, dopóki nie przyjdzie w nich
+        // wiadomość. Przeglądamy więc również _state.json na dysku, inaczej
+        // oczekujące wpisy omijałyby kasowanie bez końca.
+        for (const file of await this.stateFilesOnDisk()) {
+            if (handled.has(path.resolve(file).toLowerCase())) continue;
+
+            const saved = await readJson<ChatStateFile>(file);
+            if (!Array.isArray(saved?.pendingMessages)) continue;
+
+            const before = saved.pendingMessages.length;
+            saved.pendingMessages = saved.pendingMessages.filter((m) => m.timestamp >= cutoff);
+            const diff = before - saved.pendingMessages.length;
+            if (diff === 0) continue;
+
+            removed += diff;
+            saved.lastUpdated = new Date().toISOString();
+            try {
+                await writeJsonAtomic(file, saved);
+            } catch (err) {
+                log.quiet(err, { stage: `kasowanie oczekujących (${file})` });
+            }
+        }
+
+        // W bazie kasujemy po tym samym terminie, co pliki na dysku -
+        // inaczej panel pokazywałby rozmowy, których w archiwum już nie ma.
+        const fromDb = (await this.db?.deleteOlderThan(cutoff)) ?? 0;
+        if (fromDb > 0) log.info(`[Kasowanie] usunięto z bazy ${fromDb} wiadomości`);
+
+        if (removed > 0) {
+            log.info(`[Kasowanie] usunięto ${removed} oczekujących wiadomości starszych niż ${days} dni`);
+        }
+        return removed;
+    }
+
+    /** Pliki stanu zwykłych czatów oraz Statusy/<autor>. */
+    private async stateFilesOnDisk(): Promise<string[]> {
+        const files: string[] = [];
+
+        for (const entry of await listDirents(this.config.logsDir)) {
+            if (!entry.isDirectory() || entry.name === '_avatars') continue;
+
+            const dir = path.join(this.config.logsDir, entry.name);
+            const direct = path.join(dir, '_state.json');
+            if (await pathExists(direct)) files.push(direct);
+
+            if (entry.name !== STATUS_DIR) continue;
+            for (const author of await listDirents(dir)) {
+                if (!author.isDirectory()) continue;
+                const nested = path.join(dir, author.name, '_state.json');
+                if (await pathExists(nested)) files.push(nested);
+            }
+        }
+        return files;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    //  Zamykanie
+    // ─────────────────────────────────────────────────────────────────────
+
+    /** Zrzuca na dysk wszystko, co czeka w pamięci. Wołane przy zamykaniu. */
+    async flushAll(): Promise<void> {
+        for (const [chatId, state] of [...this.states]) {
+            await this.enqueue(chatId, async () => {
+                await this.flushBatch(state);
+                // Czat bez oczekujących wiadomości też ma co zapisać -
+                // choćby listę już zarchiwizowanych relacji.
+                await this.saveState(state);
+            });
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    //  Spis czatów i kolejka
+    // ─────────────────────────────────────────────────────────────────────
+
+    /**
+     * Zapamiętuje, pod jaką nazwą i w którym folderze siedzi czat. Wpis idzie
+     * też pod identyfikatorem z wiadomości (@lid): przy kolejnym uruchomieniu
+     * WhatsApp może rozwikłać go na numer, a wtedy klucz jest już inny
+     * i bez tego drugiego wpisu archiwum rozjechałoby się na dwa foldery.
+     */
+    private async rememberChat(state: ChatState): Promise<void> {
+        const entry: ChatIndexEntry = {
+            name: state.name,
+            safeName: state.safeName,
+            tier: state.nameTier,
+        };
+
+        const aliasKey =
+            state.rawId && state.rawId !== state.id
+                ? state.isStatus
+                    ? statusChatId(state.rawId)
+                    : state.rawId
+                : null;
+        const keys = aliasKey ? [state.id, aliasKey] : [state.id];
+
+        const changed = keys.some((key) => {
+            const known = this.index.get(key);
+            return (
+                !known ||
+                known.name !== entry.name ||
+                known.safeName !== entry.safeName ||
+                known.tier !== entry.tier
+            );
+        });
+        if (!changed) return;
+
+        for (const key of keys) this.index.set(key, entry);
+        try {
+            await writeJsonAtomic(this.indexFile, Object.fromEntries(this.index));
+        } catch (err) {
+            log.error('Nie udało się zapisać spisu czatów', err);
+        }
+
+        await this.db?.saveChat({
+            id: state.id,
+            name: state.name,
+            nameTier: state.nameTier,
+            folder: state.safeName,
+            isStatus: state.isStatus,
+            isGroup: state.id.endsWith('@g.us'),
+        });
+    }
+
+    private loadIndex(): void {
+        const saved = readJsonSync<Record<string, ChatIndexEntry>>(this.indexFile);
+        for (const [id, entry] of Object.entries(saved ?? {})) {
+            if (entry?.safeName) {
+                this.index.set(id, { ...entry, tier: entry.tier ?? NameTier.ID });
+            }
+        }
+    }
+
+    /**
+     * Dokleja zadanie do łańcucha promisów danego czatu. Dwie wiadomości
+     * z tego samego czatu nigdy nie wykonują się równolegle, więc nie ma
+     * wyścigu ani przy tworzeniu stanu, ani przy zapisie plików.
+     */
+    private enqueue<T>(chatId: string, task: () => Promise<T>): Promise<T> {
+        const previous = this.queues.get(chatId) ?? Promise.resolve();
+        const next = previous.then(task, task);
+        this.queues.set(
+            chatId,
+            next.catch(() => undefined),
+        );
+        return next;
+    }
+
+    /**
+     * Po zsynchronizowaniu WhatsAppa pytamy o kontakty jeszcze raz. Nazwy
+     * ustalone przed synchronizacją bywały prowizorką - numerem zamiast
+     * nazwiska - i nie ma powodu, żeby taka została na stałe.
+     */
+    refreshAfterSync(): void {
+        this.identity.refreshAfterSync();
+        for (const state of this.states.values()) state.nameRetryAt = 0;
+    }
+}
+
+// ── Wiadomości bez treści tekstowej ─────────────────────────────────────
+
+function locationInfo(message: WaMessage): LocationInfo | null {
+    if (message.type !== 'location' || !message.location) return null;
+    const loc = message.location;
+    return {
+        latitude: Number(loc.latitude),
+        longitude: Number(loc.longitude),
+        name: loc.name ?? null,
+        address: loc.address ?? null,
+    };
+}
+
+function vCardInfo(message: WaMessage): VCardInfo[] | null {
+    const cards = message.vCards;
+    if (!Array.isArray(cards) || cards.length === 0) return null;
+
+    return cards.map((rawCard) => {
+        const text = String(rawCard ?? '');
+        return {
+            name: /^FN[^:]*:(.+)$/im.exec(text)?.[1]?.trim() ?? null,
+            numbers: [...text.matchAll(/^TEL[^:]*:(.+)$/gim)]
+                .map((m) => m[1]?.trim() ?? '')
+                .filter(Boolean),
+            org: /^ORG[^:]*:(.+)$/im.exec(text)?.[1]?.trim() ?? null,
+        };
+    });
+}
+
+function pollInfo(message: WaMessage): PollInfo | null {
+    if (message.type !== 'poll_creation') return null;
+
+    const options = Array.isArray(message.pollOptions)
+        ? message.pollOptions
+              .map((o) => (typeof o === 'string' ? o : (o as { name?: string })?.name))
+              .filter((o): o is string => Boolean(o))
+        : [];
+
+    return {
+        question: message.pollName ?? null,
+        options,
+        multiple: message.allowMultipleAnswers === true,
+    };
+}
+
+async function readText(file: string): Promise<string | null> {
+    try {
+        return await fs.readFile(file, 'utf8');
+    } catch {
+        return null;
+    }
+}

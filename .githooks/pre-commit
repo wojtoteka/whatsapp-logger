@@ -1,69 +1,64 @@
 #!/bin/sh
 #
-# Blokada sekretów w plikach, które trafiają do repozytorium.
+# Blokada sekretow w tym, co trafia do repozytorium.
 #
-# Sprawdza to, co masz w poczekalni (git add), a nie to, co leży na dysku.
-# Sekrety mają siedzieć w src/config.local.js, bo ten plik jest w .gitignore.
+# Sprawdza poczekalnie (git add), a nie to, co lezy na dysku. Wszystkie
+# wartosci wrazliwe maja siedziec w .env, ktory jest w .gitignore.
 #
-# Włączenie po świeżym klonie:
+# Wlaczenie po swiezym klonie:
 #     git config core.hooksPath .githooks
 #
-# Pominięcie w wyjątkowej sytuacji: git commit --no-verify
-
-# Pliki śledzone, w których nie może być wartości wrażliwych
-PLIKI="src/config.js src/config.local.example.js"
-
-# Klucze, które muszą zostać puste
-KLUCZE="LOCKED_CHAT_PASSWORD|DISCORD_WEBHOOK_URL|DISCORD_PING_USER_ID"
+# Pominiecie w wyjatkowej sytuacji: git commit --no-verify
 
 blad=0
 
 komunikat() {
     echo ""
-    echo "  BLOKADA: w $1 jest sekret"
+    echo "  BLOKADA: $1"
     echo ""
     echo "  $2"
     echo ""
-    echo "  Przenies wartosc do src/config.local.js (plik jest w .gitignore)"
-    echo "  i zostaw tu pusty napis."
-    echo ""
 }
 
-# 1. Puste pola na sekrety w plikach szablonowych
-for plik in $PLIKI; do
-    # Plik nie jest w poczekalni, nic do sprawdzenia
-    git diff --cached --name-only --diff-filter=ACM | grep -qx "$plik" || continue
-
-    tresc=$(git show ":$plik" 2>/dev/null) || continue
-
-    trafienia=$(printf '%s\n' "$tresc" \
-        | grep -nE "^[[:space:]]*($KLUCZE)[[:space:]]*:[[:space:]]*['\"][^'\"]")
-
-    if [ -n "$trafienia" ]; then
-        komunikat "$plik" "$(printf '%s' "$trafienia" | head -3)"
-        blad=1
-    fi
-done
-
-# 2. Adres webhooka Discorda w dowolnym pliku idącym do repozytorium
-for plik in $(git diff --cached --name-only --diff-filter=ACM); do
-    case "$plik" in
-        *.js|*.json|*.md|*.txt|*.yml|*.yaml|*.env*) ;;
-        *) continue ;;
-    esac
-
-    tresc=$(git show ":$plik" 2>/dev/null) || continue
-
-    if printf '%s\n' "$tresc" | grep -qE 'https://(canary\.|ptb\.)?discord(app)?\.com/api/webhooks/[0-9]+/'; then
-        komunikat "$plik" "znaleziono pelny adres webhooka Discorda"
-        blad=1
-    fi
-done
-
-if [ "$blad" -ne 0 ]; then
-    echo "  Commit wstrzymany. Nic nie zostalo zapisane."
-    echo ""
-    exit 1
+# 1. Sam plik .env nie ma prawa trafic do repozytorium
+if git diff --cached --name-only --diff-filter=ACM | grep -qx ".env"; then
+    komunikat "plik .env jest w poczekalni" \
+        "Ten plik trzyma hasla i webhook. Wyjmij go: git rm --cached .env"
+    blad=1
 fi
 
-exit 0
+# 2. Szablon .env.example ma miec puste wartosci
+if git diff --cached --name-only --diff-filter=ACM | grep -qx ".env.example"; then
+    KLUCZE="LOCKED_CHAT_PASSWORD|DISCORD_WEBHOOK_URL|DISCORD_PING_USER_ID"
+    trafienia=$(git show ":.env.example" 2>/dev/null \
+        | grep -nE "^[[:space:]]*($KLUCZE)[[:space:]]*=[[:space:]]*[^[:space:]]")
+
+    if [ -n "$trafienia" ]; then
+        komunikat "w .env.example jest wypelniona wartosc wrazliwa" \
+            "$trafienia"
+        echo "  Zostaw tam pusta wartosc, a swoja wpisz do .env"
+        echo ""
+        blad=1
+    fi
+fi
+
+# 3. Prawdziwy webhook Discorda nie moze sie pojawic w zadnym sledzonym pliku.
+#
+# Szukamy pelnych danych logowania, a nie samego ksztaltu adresu: ID to
+# snowflake (17+ cyfr), a token ma kilkadziesiat znakow. Dzieki temu atrapy
+# w testach ("/123/abc") przechodza, a wyciek prawdziwego adresu nie.
+WZOR="discord(app)?[.]com/api/webhooks/[0-9]{17,}/[A-Za-z0-9_-]{30,}"
+
+webhooki=$(git diff --cached --name-only --diff-filter=ACM \
+    | while read -r plik; do
+        git show ":$plik" 2>/dev/null \
+            | grep -Eq "$WZOR" && echo "$plik"
+      done)
+
+if [ -n "$webhooki" ]; then
+    komunikat "adres webhooka Discorda w plikach: $webhooki" \
+        "Przenies go do .env (plik jest w .gitignore)."
+    blad=1
+fi
+
+exit $blad

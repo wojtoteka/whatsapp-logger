@@ -1,7 +1,21 @@
-node_modules/
+# Sekrety i konfiguracja lokalna
+.env
+
+# Archiwum rozmów i sesja WhatsAppa
+logs/
 .wwebjs_auth/
 .wwebjs_cache/
-logs/
+
+# Wynik kompilacji
+dist/
+panel/.next/
+panel/next-env.d.ts
+panel/tsconfig.tsbuildinfo
+panel/.env
+
+# Zależności
+node_modules/
+
+# Pozostałe
 *.log
 .discord_cooldown.json
-config.local.js

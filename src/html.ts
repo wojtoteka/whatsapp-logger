@@ -1,17 +1,23 @@
-// Generator plików HTML z wiadomościami WhatsApp
+// Generator plików HTML z zapisem rozmowy.
 //
 // Wygląd: ciemna morska tonacja, bąbelki jak w komunikatorze. Twoje po prawej
 // w zieleni morskiej, cudze po lewej na granatowym panelu. Pasek z nazwą czatu
-// trzyma się góry przy przewijaniu, a w grupach każdy nadawca ma stały kolor imienia.
+// trzyma się góry przy przewijaniu, a w grupach każdy nadawca ma stały kolor
+// imienia. Plik jest samowystarczalny - żadnych zewnętrznych arkuszy ani
+// bibliotek, więc archiwum czyta się także bez internetu.
 
-const config = require('./config');
+import type { ArchivedMessage } from './types';
+import { formatBytes } from './util';
 
 // Znaczniki wokół odnośnika "dalej". W chwili zapisu partia jest najnowsza,
-// więc odnośnik jest wyszarzony. Gdy powstanie kolejna część, storage.js
+// więc odnośnik jest wyszarzony; gdy powstanie kolejna część, archive.ts
 // podmienia zawartość między znacznikami na działający odnośnik.
-const MARK_OPEN  = '<!--nav-next-->';
-const MARK_CLOSE = '<!--/nav-next-->';
-const NEXT_LINK_MARKER = { open: MARK_OPEN, close: MARK_CLOSE };
+export const NEXT_LINK_MARKER = { open: '<!--nav-next-->', close: '<!--/nav-next-->' } as const;
+
+// Miejsce w bąbelku, w które wchodzi notka o skasowaniu wiadomości. Wiadomość
+// może zostać skasowana długo po zapisaniu pliku, więc kotwica musi być
+// w każdym bąbelku z góry.
+const DELETED_SLOT = { open: '<!--del-->', close: '<!--/del-->' } as const;
 
 // ─────────────────────────────────────────────────────────────────────
 //  Tekst
@@ -21,7 +27,7 @@ const NEXT_LINK_MARKER = { open: MARK_OPEN, close: MARK_CLOSE };
  * Escapuje znaki HTML. Używane też w atrybutach, więc bez zamiany
  * końców wiersza na znaczniki.
  */
-function esc(text) {
+export function esc(text: unknown): string {
     if (text === null || text === undefined || text === '') return '';
     return String(text)
         .replace(/&/g, '&amp;')
@@ -35,24 +41,24 @@ function esc(text) {
  * Zamienia adresy w gotowym, już bezpiecznym tekście na klikalne odnośniki.
  * Działa na tekście po escapowaniu, więc nie da się tędy wstrzyknąć znacznika.
  */
-function linkify(escaped) {
+function linkify(escaped: string): string {
     return escaped.replace(/(?:https?:\/\/|www\.)[^\s<]+/gi, (match) => {
-        let url  = match;
+        let url = match;
         let tail = '';
 
         // Kropka, przecinek albo nawias na końcu zdania nie należą do adresu.
         // Tak samo doklejona encja HTML, na przykład cudzysłów.
         for (;;) {
-            const entity = url.match(/&(?:amp|quot|#039|lt|gt);$/);
+            const entity = /&(?:amp|quot|#039|lt|gt);$/.exec(url);
             if (entity) {
                 tail = entity[0] + tail;
-                url  = url.slice(0, -entity[0].length);
+                url = url.slice(0, -entity[0].length);
                 continue;
             }
-            const punct = url.match(/[.,;:!?)\]}]$/);
+            const punct = /[.,;:!?)\]}]$/.exec(url);
             if (punct) {
                 tail = punct[0] + tail;
-                url  = url.slice(0, -1);
+                url = url.slice(0, -1);
                 continue;
             }
             break;
@@ -65,58 +71,62 @@ function linkify(escaped) {
 }
 
 /** Treść wiadomości: escapowanie, klikalne adresy, końce wiersza. */
-function fmt(text) {
+function fmt(text: unknown): string {
     return linkify(esc(text)).replace(/\r?\n/g, '<br>');
 }
 
-function formatBytes(bytes) {
-    if (!bytes || bytes < 0) return null;
-    if (bytes < 1024) return `${bytes} B`;
-    if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-const TYPE_NAMES = {
-    image:         'zdjęcie',
-    video:         'film',
-    audio:         'nagranie',
-    ptt:           'wiadomość głosowa',
-    document:      'dokument',
-    sticker:       'naklejka',
-    location:      'lokalizacja',
-    vcard:         'kontakt',
-    multi_vcard:   'kontakty',
+const TYPE_NAMES: Record<string, string> = {
+    image: 'zdjęcie',
+    video: 'film',
+    audio: 'nagranie',
+    ptt: 'wiadomość głosowa',
+    document: 'dokument',
+    sticker: 'naklejka',
+    location: 'lokalizacja',
+    vcard: 'kontakt',
+    multi_vcard: 'kontakty',
     poll_creation: 'ankieta',
+    revoked: 'wiadomość skasowana',
 };
 
-function typeName(type) {
-    return TYPE_NAMES[type] || 'plik';
+export function typeName(type: string): string {
+    return TYPE_NAMES[type] ?? 'plik';
+}
+
+/** Krótka etykieta typu, używana tam, gdzie nie ma treści do pokazania. */
+export function typeLabel(type: string): string {
+    const name = TYPE_NAMES[type];
+    return name ? `[${name}]` : '[media]';
 }
 
 // ─────────────────────────────────────────────────────────────────────
 //  Daty
 // ─────────────────────────────────────────────────────────────────────
 
-function formatTimestamp(ts) {
+function formatTimestamp(ts: number): string {
     return new Date(ts * 1000).toLocaleString('pl-PL', {
-        day: '2-digit', month: '2-digit', year: 'numeric',
-        hour: '2-digit', minute: '2-digit',
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
     });
 }
 
-function formatTime(ts) {
-    return new Date(ts * 1000).toLocaleTimeString('pl-PL', {
-        hour: '2-digit', minute: '2-digit',
-    });
+function formatTime(ts: number): string {
+    return new Date(ts * 1000).toLocaleTimeString('pl-PL', { hour: '2-digit', minute: '2-digit' });
 }
 
-function formatDate(ts) {
+function formatDate(ts: number): string {
     return new Date(ts * 1000).toLocaleDateString('pl-PL', {
-        weekday: 'long', day: 'numeric', month: 'long', year: 'numeric',
+        weekday: 'long',
+        day: 'numeric',
+        month: 'long',
+        year: 'numeric',
     });
 }
 
-function isoDate(ts) {
+function isoDate(ts: number): string {
     return new Date(ts * 1000).toISOString();
 }
 
@@ -139,8 +149,8 @@ const ICON_SPRITE = `
   </defs>
 </svg>`;
 
-function icon(name, extraClass = '') {
-    return `<svg class="${('icon ' + extraClass).trim()}" aria-hidden="true" focusable="false"><use href="#i-${name}"></use></svg>`;
+function icon(name: string, extraClass = ''): string {
+    return `<svg class="${`icon ${extraClass}`.trim()}" aria-hidden="true" focusable="false"><use href="#i-${name}"></use></svg>`;
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -152,11 +162,11 @@ const VIDEO_EXT = ['mp4', '3gp', 'mov', 'avi', 'webm'];
 const AUDIO_EXT = ['ogg', 'mp3', 'opus', 'm4a', 'aac', 'mpeg', 'wav'];
 
 /** Zapisany plik: zdjęcie, film, nagranie albo dokument do pobrania. */
-function renderMedia(msg) {
+function renderMedia(msg: ArchivedMessage): string {
     if (!msg.mediaPath) return '';
 
     const url = esc(msg.mediaPath.replace(/\\/g, '/'));
-    const ext = (msg.mediaPath.split('.').pop() || '').toLowerCase();
+    const ext = (msg.mediaPath.split('.').pop() ?? '').toLowerCase();
     const who = esc(msg.from);
 
     if (msg.type === 'sticker') {
@@ -188,15 +198,15 @@ function renderMedia(msg) {
         </figure>`;
     }
 
-    const name = esc(msg.mediaName || msg.mediaPath.split(/[\\/]/).pop());
+    const name = esc(msg.mediaName ?? msg.mediaPath.split(/[\\/]/).pop());
     return `<p class="file">${icon('clip')}<a href="${url}" download>${name}</a>
         <span class="mono small">${esc(ext.toUpperCase())}</span></p>`;
 }
 
 /** Notatka o pliku, którego nie zapisaliśmy. */
-function renderSkipped(msg) {
+function renderSkipped(msg: ArchivedMessage): string {
     if (!msg.mediaSkipped) return '';
-    const meta  = msg.mediaSkipped;
+    const meta = msg.mediaSkipped;
     const parts = [typeName(meta.type)];
     if (meta.filename) parts.push(`"${meta.filename}"`);
     const size = formatBytes(meta.bytes);
@@ -207,7 +217,7 @@ function renderSkipped(msg) {
         <span class="reason">Powód: ${esc(meta.reason || 'nieznany')}.</span></span></p>`;
 }
 
-function renderLocation(msg) {
+function renderLocation(msg: ArchivedMessage): string {
     if (!msg.location) return '';
     const { latitude, longitude, name, address } = msg.location;
     if (typeof latitude !== 'number' || typeof longitude !== 'number') return '';
@@ -222,38 +232,43 @@ function renderLocation(msg) {
         <span class="mono small">${lat}, ${lon}</span></p>`;
 }
 
-function renderContacts(msg) {
+function renderContacts(msg: ArchivedMessage): string {
     if (!msg.contacts || msg.contacts.length === 0) return '';
 
-    const cards = msg.contacts.map((c) => {
-        const name = esc(c.name || 'Kontakt bez nazwy');
-        const org  = c.org ? `<p class="vcard-org">${esc(c.org)}</p>` : '';
-        const nums = (c.numbers || []).length
-            ? `<ul class="vcard-tel">${c.numbers.map(n =>
-                `<li><a class="link" href="tel:${esc(n.replace(/[^\d+]/g, ''))}">${esc(n)}</a></li>`).join('')}</ul>`
-            : '<p class="vcard-org">Brak numeru w wizytówce</p>';
-        return `<div class="vcard">${icon('person')}<div><p class="vcard-name">${name}</p>${org}${nums}</div></div>`;
-    }).join('');
+    const cards = msg.contacts
+        .map((c) => {
+            const name = esc(c.name ?? 'Kontakt bez nazwy');
+            const org = c.org ? `<p class="vcard-org">${esc(c.org)}</p>` : '';
+            const nums = c.numbers.length
+                ? `<ul class="vcard-tel">${c.numbers
+                      .map(
+                          (n) =>
+                              `<li><a class="link" href="tel:${esc(n.replace(/[^\d+]/g, ''))}">${esc(n)}</a></li>`,
+                      )
+                      .join('')}</ul>`
+                : '<p class="vcard-org">Brak numeru w wizytówce</p>';
+            return `<div class="vcard">${icon('person')}<div><p class="vcard-name">${name}</p>${org}${nums}</div></div>`;
+        })
+        .join('');
 
     return `<div class="vcards">${cards}</div>`;
 }
 
-function renderPoll(msg) {
+function renderPoll(msg: ArchivedMessage): string {
     if (!msg.poll) return '';
-    const options = (msg.poll.options || [])
-        .map(o => `<li>${esc(o)}</li>`).join('');
+    const options = msg.poll.options.map((o) => `<li>${esc(o)}</li>`).join('');
     const note = msg.poll.multiple ? '<p class="poll-note">Można wybrać kilka odpowiedzi.</p>' : '';
 
     return `<div class="poll">
         <p class="poll-head">${icon('poll')}Ankieta</p>
-        <p class="poll-q">${fmt(msg.poll.question || 'Pytanie bez treści')}</p>
+        <p class="poll-q">${fmt(msg.poll.question ?? 'Pytanie bez treści')}</p>
         ${options ? `<ul class="poll-opts">${options}</ul>` : ''}
         ${note}
         <p class="poll-note">Wyniki głosowania nie są zapisywane.</p>
     </div>`;
 }
 
-function renderQuote(msg) {
+function renderQuote(msg: ArchivedMessage): string {
     if (!msg.quotedMsg) return '';
     return `<blockquote class="quote">
         <p class="quote-who">${esc(msg.quotedMsg.sender)}</p>
@@ -261,7 +276,7 @@ function renderQuote(msg) {
     </blockquote>`;
 }
 
-function renderAvatar(msg) {
+function renderAvatar(msg: ArchivedMessage): string {
     if (msg.fromMe) return '';
     if (msg.avatar) {
         const url = esc(String(msg.avatar).replace(/\\/g, '/'));
@@ -275,8 +290,8 @@ function renderAvatar(msg) {
  * Stały kolor imienia nadawcy, liczony z jego nazwy. W grupie każdy ma
  * swój odcień i nie zmienia się on między plikami.
  */
-function senderTone(name) {
-    const text = String(name || '');
+export function senderTone(name: string): string {
+    const text = String(name ?? '');
     let hash = 0;
     for (let i = 0; i < text.length; i++) {
         hash = (hash * 31 + text.charCodeAt(i)) % 100000;
@@ -284,14 +299,17 @@ function senderTone(name) {
     return `n${(hash % 6) + 1}`;
 }
 
+/** Notka wstawiana do bąbelka wiadomości skasowanej w WhatsAppie. */
+function deletedNote(): string {
+    return `<p class="gone">${icon('trash')}Skasowana w WhatsAppie. Treść została w archiwum.</p>`;
+}
+
 /** Pojedynczy wpis w zapisie rozmowy. */
-function renderMessage(msg) {
-    const own       = msg.fromMe;
+function renderMessage(msg: ArchivedMessage): string {
+    const own = msg.fromMe;
     const isDeleted = msg.type === 'revoked' || msg.isDeleted;
 
-    const forwarded = msg.isForwarded
-        ? `<p class="flag">${icon('forward')}Przekazana dalej</p>`
-        : '';
+    const forwarded = msg.isForwarded ? `<p class="flag">${icon('forward')}Przekazana dalej</p>` : '';
 
     // Przy własnych wiadomościach imienia nie piszemy, mówi o tym strona
     // bąbelka i jego kolor.
@@ -299,22 +317,17 @@ function renderMessage(msg) {
 
     // Przy wizytówce body trzyma surowy vCard, przy ankiecie samo pytanie.
     // Jedno i drugie pokazujemy już rozłożone na części, więc body pomijamy.
-    const bodyInside = (msg.contacts && (msg.type === 'vcard' || msg.type === 'multi_vcard'))
-        || (msg.poll && msg.type === 'poll_creation');
+    const bodyInside =
+        (msg.contacts && (msg.type === 'vcard' || msg.type === 'multi_vcard')) ||
+        (msg.poll && msg.type === 'poll_creation');
 
-    const body = msg.body && !bodyInside
-        ? `<div class="text">${fmt(msg.body)}</div>`
-        : '';
+    const body = msg.body && !bodyInside ? `<div class="text">${fmt(msg.body)}</div>` : '';
 
     // Wiadomość, po której nie zostało nic poza typem
-    const empty = !msg.body && !msg.mediaPath && !msg.mediaSkipped
-        && !msg.location && !msg.contacts && !msg.poll && !isDeleted
-        ? `<p class="empty">Wiadomość typu ${esc(TYPE_NAMES[msg.type] || `"${msg.type}"`)}, bez zapisanej treści.</p>`
-        : '';
-
-    const deleted = isDeleted
-        ? `<p class="gone">${icon('trash')}Skasowana w WhatsAppie. Treść została w archiwum.</p>`
-        : '';
+    const empty =
+        !msg.body && !msg.mediaPath && !msg.mediaSkipped && !msg.location && !msg.contacts && !msg.poll && !isDeleted
+            ? `<p class="empty">Wiadomość typu ${esc(TYPE_NAMES[msg.type] ?? `"${msg.type}"`)}, bez zapisanej treści.</p>`
+            : '';
 
     const parts = [
         who,
@@ -327,22 +340,28 @@ function renderMessage(msg) {
         renderPoll(msg),
         body,
         empty,
-        deleted,
-    ].filter(Boolean).join('\n            ');
+    ]
+        .filter(Boolean)
+        .join('\n            ');
+
+    // Notka o skasowaniu siedzi w kotwicy, którą da się wypełnić także
+    // później - wiadomość bywa kasowana długo po zapisaniu pliku.
+    const deleted = `${DELETED_SLOT.open}${isDeleted ? deletedNote() : ''}${DELETED_SLOT.close}`;
 
     return `
-    <article class="msg ${own ? 'own' : 'in'}">
+    <article class="msg ${own ? 'own' : 'in'}${isDeleted ? ' was-deleted' : ''}" data-id="${esc(msg.id)}">
         ${renderAvatar(msg)}
         <div class="bubble">
             ${parts}
+            ${deleted}
             <p class="stamp"><time class="mono" datetime="${isoDate(msg.timestamp)}">${formatTime(msg.timestamp)}</time></p>
         </div>
     </article>`;
 }
 
-function renderStream(messages) {
+function renderStream(messages: ArchivedMessage[]): string {
     let html = '';
-    let lastDate = null;
+    let lastDate: string | null = null;
 
     for (const msg of messages) {
         const day = formatDate(msg.timestamp);
@@ -357,22 +376,69 @@ function renderStream(messages) {
 }
 
 // ─────────────────────────────────────────────────────────────────────
+//  Dopisywanie do gotowego pliku
+// ─────────────────────────────────────────────────────────────────────
+
+/** Nazwa pliku danej części - jedno miejsce, żeby nie rozjechać formatu. */
+export function batchFileName(batchNum: number): string {
+    return `messages_${String(batchNum).padStart(4, '0')}.html`;
+}
+
+/** Ta sama partia w postaci danych, obok pliku HTML. */
+export function batchDataName(batchNum: number): string {
+    return `messages_${String(batchNum).padStart(4, '0')}.json`;
+}
+
+/**
+ * Dopisuje notkę o skasowaniu do wiadomości w zapisanym już pliku.
+ * Zwraca null, gdy tej wiadomości w pliku nie ma albo notka już tam jest -
+ * dzięki temu wołający wie, czy w ogóle jest co zapisywać.
+ */
+export function markDeletedInHtml(html: string, messageId: string): string | null {
+    const anchor = `data-id="${esc(messageId)}"`;
+    const start = html.indexOf(anchor);
+    if (start === -1) return null;
+
+    const slotStart = html.indexOf(DELETED_SLOT.open, start);
+    const slotEnd = html.indexOf(DELETED_SLOT.close, slotStart);
+    if (slotStart === -1 || slotEnd === -1) return null;
+
+    // Kotwica jest już wypełniona - wiadomość oznaczono wcześniej.
+    if (slotEnd > slotStart + DELETED_SLOT.open.length) return null;
+
+    const before = html.slice(0, slotStart + DELETED_SLOT.open.length);
+    const after = html.slice(slotEnd);
+
+    // Do klasy artykułu dokładamy znacznik, żeby dało się je wyszukać w pliku.
+    const articleStart = html.lastIndexOf('<article class="msg ', start);
+    let patched = before + deletedNote() + after;
+    if (articleStart !== -1 && articleStart < start) {
+        const head = patched.slice(articleStart, start);
+        if (!head.includes('was-deleted')) {
+            patched =
+                patched.slice(0, articleStart) +
+                head.replace('<article class="msg ', '<article class="msg was-deleted ') +
+                patched.slice(start);
+        }
+    }
+    return patched;
+}
+
+// ─────────────────────────────────────────────────────────────────────
 //  Nawigacja
 // ─────────────────────────────────────────────────────────────────────
 
-const padded = (n) => String(n).padStart(4, '0');
-
-function buildNextLink(batchNum) {
-    return `<a class="pager-link" href="messages_${padded(batchNum)}.html" rel="next">Część ${batchNum}${icon('next')}</a>`;
+export function buildNextLink(batchNum: number): string {
+    return `<a class="pager-link" href="${batchFileName(batchNum)}" rel="next">Część ${batchNum}${icon('next')}</a>`;
 }
 
-function buildNextDisabled() {
+function buildNextDisabled(): string {
     return `<span class="pager-link off">Dalszych części jeszcze nie ma${icon('next')}</span>`;
 }
 
-function buildPrevLink(batchNum) {
+function buildPrevLink(batchNum: number): string {
     return batchNum > 1
-        ? `<a class="pager-link" href="messages_${padded(batchNum - 1)}.html" rel="prev">${icon('prev')}Część ${batchNum - 1}</a>`
+        ? `<a class="pager-link" href="${batchFileName(batchNum - 1)}" rel="prev">${icon('prev')}Część ${batchNum - 1}</a>`
         : `<span class="pager-link off">${icon('prev')}To pierwsza część</span>`;
 }
 
@@ -380,33 +446,54 @@ function buildPrevLink(batchNum) {
 //  Cały plik
 // ─────────────────────────────────────────────────────────────────────
 
-/**
- * Główna funkcja - generuje kompletny plik HTML z partią wiadomości.
- * totalBatches to numer najnowszej istniejącej części. Gdy równa się
- * batchNum, odnośnik "dalej" jest wyszarzony.
- */
+export interface HtmlOptions {
+    chatName: string;
+    batchNum: number;
+    messages: ArchivedMessage[];
+    /** Czy to na razie najnowsza część - wtedy "dalej" jest wyszarzone. */
+    isLatest: boolean;
+    messagesPerFile: number;
+    /** Zdanie o kasowaniu starych plików, do stopki. */
+    retentionNote: string;
+}
 
-function generateHtml({ chatName, batchNum, messages, totalBatches }) {
-    const list       = Array.isArray(messages) ? messages : [];
+/** Nagłówki, które trzeba podmienić, gdy czat dostanie lepszą nazwę. */
+export function titleSwaps(oldName: string, newName: string): Array<[string, string]> {
+    const monogram = (text: string): string => esc(text.trim().charAt(0).toUpperCase() || '?');
+    return [
+        [`<title>${esc(oldName)}, część`, `<title>${esc(newName)}, część`],
+        [`<h1>${esc(oldName)}</h1>`, `<h1>${esc(newName)}</h1>`],
+        [
+            `<div class="avatar" aria-hidden="true">${monogram(oldName)}</div>`,
+            `<div class="avatar" aria-hidden="true">${monogram(newName)}</div>`,
+        ],
+    ];
+}
+
+export function generateHtml(options: HtmlOptions): string {
+    const { chatName, batchNum, messages, isLatest, messagesPerFile, retentionNote } = options;
+
+    const list = Array.isArray(messages) ? messages : [];
     const streamHtml = renderStream(list);
-    const first      = list.length ? formatTimestamp(list[0].timestamp) : 'brak';
-    const last       = list.length ? formatTimestamp(list[list.length - 1].timestamp) : 'brak';
-    const monogram   = esc((chatName || '?').trim().charAt(0).toUpperCase() || '?');
-    const savedAt    = new Date().toLocaleString('pl-PL', {
-        day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit',
+    const firstMsg = list[0];
+    const lastMsg = list[list.length - 1];
+    const first = firstMsg ? formatTimestamp(firstMsg.timestamp) : 'brak';
+    const last = lastMsg ? formatTimestamp(lastMsg.timestamp) : 'brak';
+    const monogram = esc(chatName.trim().charAt(0).toUpperCase() || '?');
+    const savedAt = new Date().toLocaleString('pl-PL', {
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
     });
 
-    const latest   = Number.isFinite(totalBatches) ? totalBatches : batchNum;
-    const nextHtml = batchNum < latest ? buildNextLink(batchNum + 1) : buildNextDisabled();
-    const nav = (place) => `
+    const nextHtml = isLatest ? buildNextDisabled() : buildNextLink(batchNum + 1);
+    const nav = (place: string): string => `
     <nav class="pager" aria-label="Nawigacja między częściami zapisu (${place})">
         ${buildPrevLink(batchNum)}
-        ${MARK_OPEN}${nextHtml}${MARK_CLOSE}
+        ${NEXT_LINK_MARKER.open}${nextHtml}${NEXT_LINK_MARKER.close}
     </nav>`;
-
-    const retention = config.RETENTION_ENABLED && config.RETENTION_DAYS > 0
-        ? `Starsze pliki kasują się po ${config.RETENTION_DAYS} dniach.`
-        : 'Kasowanie starych plików jest wyłączone.';
 
     return `<!DOCTYPE html>
 <html lang="pl">
@@ -738,7 +825,7 @@ ${ICON_SPRITE}
     ${nav('dół strony')}
 
     <footer class="colophon">
-        <p>Plik powstaje automatycznie i zamyka się co ${config.MESSAGES_PER_FILE} wiadomości. ${esc(retention)}</p>
+        <p>Plik powstaje automatycznie i zamyka się co ${messagesPerFile} wiadomości. ${esc(retentionNote)}</p>
         <p>Godziny pokazujemy w strefie czasowej komputera, który zapisywał rozmowę.
         Program nie wie, czy wiadomość została przeczytana, więc tego nie pokazuje.</p>
     </footer>
@@ -785,5 +872,3 @@ ${ICON_SPRITE}
 </body>
 </html>`;
 }
-
-module.exports = { generateHtml, NEXT_LINK_MARKER, buildNextLink };

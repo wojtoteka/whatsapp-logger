@@ -1,0 +1,300 @@
+// Cała konfiguracja programu w jednym miejscu: plik .env w katalogu projektu.
+//
+// Kolejność źródeł: zmienna środowiskowa systemu ma pierwszeństwo przed .env,
+// a brakująca wartość spada na sensowną wartość domyślną. Nic nie jest
+// rozsypane po plikach .js - jeden plik .env i tyle.
+
+import fs from 'node:fs';
+import path from 'node:path';
+
+export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
+
+/** Typy wiadomości, których pliki program potrafi zapisać na dysk. */
+export const MEDIA_TYPES_ALL = ['image', 'video', 'audio', 'ptt', 'document', 'sticker'] as const;
+export type MediaType = (typeof MEDIA_TYPES_ALL)[number];
+
+export interface Config {
+    /** Kod do zablokowanych czatów. Pusty = obsługa wyłączona. */
+    lockedChatPassword: string;
+    /** Webhook Discorda. Pusty = powiadomienia wyłączone. */
+    discordWebhookUrl: string;
+    /** Kogo pingować przy utracie autoryzacji. Pusty = bez pingu. */
+    discordPingUserId: string;
+
+    /** Folder archiwum, zawsze ścieżka bezwzględna. */
+    logsDir: string;
+    messagesPerFile: number;
+    mediaTypes: ReadonlySet<string>;
+    maxMediaSizeMb: number;
+
+    saveProfilePics: boolean;
+    avatarRefreshDays: number;
+
+    saveStatuses: boolean;
+    sweepCheckHours: number;
+
+    retentionEnabled: boolean;
+    retentionDays: number;
+    retentionCheckHours: number;
+
+    /** Zapis do MariaDB. Wyłączony = działa samo archiwum na dysku. */
+    dbEnabled: boolean;
+    dbHost: string;
+    dbPort: number;
+    dbUser: string;
+    dbPassword: string;
+    dbName: string;
+
+    /** Uruchamianie panelu razem z loggerem. */
+    panelEnabled: boolean;
+    panelHost: string;
+    panelPort: number;
+
+    chromePath: string | null;
+    headless: boolean;
+    logLevel: LogLevel;
+    stateSaveIntervalMs: number;
+}
+
+export interface LoadResult {
+    config: Config;
+    /** Uwagi do wypisania przy starcie: literówki, wartości poza zakresem. */
+    warnings: string[];
+    /** Czy .env w ogóle istnieje - bez niego lecimy na samych domyślnych. */
+    envFileFound: boolean;
+}
+
+/**
+ * Wczytuje .env do process.env. Node robi to sam od 20.6, więc nie ma tu
+ * żadnej zewnętrznej biblioteki. Zmienna ustawiona wcześniej w systemie
+ * wygrywa z plikiem - przywracamy ją po wczytaniu.
+ */
+export function loadEnvFile(rootDir: string): boolean {
+    const file = path.join(rootDir, '.env');
+    if (!fs.existsSync(file)) return false;
+
+    const before = new Map<string, string | undefined>(
+        Object.keys(process.env).map((key) => [key, process.env[key]]),
+    );
+    process.loadEnvFile(file);
+    for (const [key, value] of before) {
+        if (value !== undefined) process.env[key] = value;
+    }
+    return true;
+}
+
+// ── Odczyt pojedynczych wartości ─────────────────────────────────────────
+
+type Env = Record<string, string | undefined>;
+
+function raw(env: Env, key: string): string | null {
+    const value = env[key];
+    if (value === undefined) return null;
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : null;
+}
+
+function readText(env: Env, key: string, fallback = ''): string {
+    return raw(env, key) ?? fallback;
+}
+
+function readBool(env: Env, key: string, fallback: boolean, warnings: string[]): boolean {
+    const value = raw(env, key);
+    if (value === null) return fallback;
+
+    const lowered = value.toLowerCase();
+    if (['true', '1', 'tak', 'yes', 'on'].includes(lowered)) return true;
+    if (['false', '0', 'nie', 'no', 'off'].includes(lowered)) return false;
+
+    warnings.push(`${key}: "${value}" to nie jest true ani false - biorę ${fallback}`);
+    return fallback;
+}
+
+interface NumberRange {
+    min?: number;
+    max?: number;
+}
+
+function readNumber(
+    env: Env,
+    key: string,
+    fallback: number,
+    warnings: string[],
+    range: NumberRange = {},
+): number {
+    const value = raw(env, key);
+    if (value === null) return fallback;
+
+    const parsed = Number(value.replace(',', '.'));
+    if (!Number.isFinite(parsed)) {
+        warnings.push(`${key}: "${value}" to nie jest liczba - biorę ${fallback}`);
+        return fallback;
+    }
+    if (range.min !== undefined && parsed < range.min) {
+        warnings.push(`${key}: ${parsed} jest poniżej dopuszczalnego ${range.min} - biorę ${range.min}`);
+        return range.min;
+    }
+    if (range.max !== undefined && parsed > range.max) {
+        warnings.push(`${key}: ${parsed} przekracza dopuszczalne ${range.max} - biorę ${range.max}`);
+        return range.max;
+    }
+    return parsed;
+}
+
+function readMediaTypes(env: Env, warnings: string[]): ReadonlySet<string> {
+    const value = raw(env, 'MEDIA_TYPES');
+    if (value === null) return new Set(MEDIA_TYPES_ALL);
+
+    // "brak" i "none" to jawne wyłączenie pobierania czegokolwiek.
+    if (['brak', 'none', '-'].includes(value.toLowerCase())) return new Set();
+
+    const wanted = value
+        .split(',')
+        .map((part) => part.trim().toLowerCase())
+        .filter((part) => part.length > 0);
+
+    const known = new Set<string>();
+    for (const type of wanted) {
+        if ((MEDIA_TYPES_ALL as readonly string[]).includes(type)) known.add(type);
+        else warnings.push(`MEDIA_TYPES: "${type}" nie jest znanym typem - pomijam`);
+    }
+    if (known.size === 0) {
+        warnings.push('MEDIA_TYPES: nie zostało nic sensownego - żadne media nie będą pobierane');
+    }
+    return known;
+}
+
+function readLogLevel(env: Env, warnings: string[]): LogLevel {
+    const value = raw(env, 'LOG_LEVEL')?.toLowerCase() ?? 'info';
+    if (value === 'debug' || value === 'info' || value === 'warn' || value === 'error') return value;
+
+    warnings.push(`LOG_LEVEL: "${value}" nie jest znanym poziomem - biorę info`);
+    return 'info';
+}
+
+/** Klucze, które program rozumie. Reszta w .env to najpewniej literówka. */
+const KNOWN_KEYS = new Set([
+    'LOCKED_CHAT_PASSWORD',
+    'DISCORD_WEBHOOK_URL',
+    'DISCORD_PING_USER_ID',
+    'LOGS_DIR',
+    'MESSAGES_PER_FILE',
+    'MEDIA_TYPES',
+    'MAX_MEDIA_SIZE_MB',
+    'SAVE_PROFILE_PICS',
+    'AVATAR_REFRESH_DAYS',
+    'SAVE_STATUSES',
+    'SWEEP_CHECK_HOURS',
+    'RETENTION_ENABLED',
+    'RETENTION_DAYS',
+    'RETENTION_CHECK_HOURS',
+    'DB_ENABLED',
+    'DB_HOST',
+    'DB_PORT',
+    'DB_USER',
+    'DB_PASSWORD',
+    'DB_NAME',
+    'PANEL_ENABLED',
+    'PANEL_HOST',
+    'PANEL_PORT',
+    'CHROME_PATH',
+    'HEADLESS',
+    'LOG_LEVEL',
+    'STATE_SAVE_INTERVAL_MS',
+]);
+
+/**
+ * Wyłapuje literówki w .env. Patrzymy wyłącznie na klucze z pliku, bo
+ * process.env jest pełen zmiennych systemu, które nas nie dotyczą.
+ */
+function warnAboutUnknownKeys(rootDir: string, warnings: string[]): void {
+    let text: string;
+    try {
+        text = fs.readFileSync(path.join(rootDir, '.env'), 'utf8');
+    } catch {
+        return;
+    }
+
+    for (const line of text.split(/\r?\n/)) {
+        const trimmed = line.trim();
+        if (trimmed.length === 0 || trimmed.startsWith('#')) continue;
+
+        const key = trimmed.split('=')[0]?.trim();
+        if (key && !KNOWN_KEYS.has(key)) {
+            warnings.push(`.env zawiera nieznane ustawienie "${key}" - literówka?`);
+        }
+    }
+}
+
+/**
+ * Buduje komplet ustawień. rootDir to katalog programu; ścieżki względne
+ * z .env liczą się właśnie od niego, a nie od katalogu, z którego akurat
+ * uruchomiono polecenie.
+ */
+export function loadConfig(rootDir: string, env: Env = process.env): LoadResult {
+    const warnings: string[] = [];
+    const envFileFound = loadEnvFile(rootDir);
+    if (envFileFound) warnAboutUnknownKeys(rootDir, warnings);
+
+    const logsDirRaw = readText(env, 'LOGS_DIR', './logs');
+
+    const config: Config = {
+        lockedChatPassword: readText(env, 'LOCKED_CHAT_PASSWORD'),
+        discordWebhookUrl: readText(env, 'DISCORD_WEBHOOK_URL'),
+        discordPingUserId: readText(env, 'DISCORD_PING_USER_ID'),
+
+        logsDir: path.resolve(rootDir, logsDirRaw),
+        messagesPerFile: readNumber(env, 'MESSAGES_PER_FILE', 70, warnings, { min: 1, max: 10000 }),
+        mediaTypes: readMediaTypes(env, warnings),
+        maxMediaSizeMb: readNumber(env, 'MAX_MEDIA_SIZE_MB', 100, warnings, { min: 0, max: 2048 }),
+
+        saveProfilePics: readBool(env, 'SAVE_PROFILE_PICS', true, warnings),
+        avatarRefreshDays: readNumber(env, 'AVATAR_REFRESH_DAYS', 30, warnings, { min: 1, max: 3650 }),
+
+        saveStatuses: readBool(env, 'SAVE_STATUSES', true, warnings),
+        sweepCheckHours: readNumber(env, 'SWEEP_CHECK_HOURS', 6, warnings, { min: 0.25, max: 720 }),
+
+        retentionEnabled: readBool(env, 'RETENTION_ENABLED', true, warnings),
+        retentionDays: readNumber(env, 'RETENTION_DAYS', 180, warnings, { min: 0, max: 36500 }),
+        retentionCheckHours: readNumber(env, 'RETENTION_CHECK_HOURS', 12, warnings, { min: 0.25, max: 720 }),
+
+        dbEnabled: readBool(env, 'DB_ENABLED', false, warnings),
+        dbHost: readText(env, 'DB_HOST', '127.0.0.1'),
+        dbPort: readNumber(env, 'DB_PORT', 3306, warnings, { min: 1, max: 65535 }),
+        dbUser: readText(env, 'DB_USER', 'root'),
+        dbPassword: readText(env, 'DB_PASSWORD'),
+        dbName: readText(env, 'DB_NAME', 'whatsapp_logger'),
+
+        panelEnabled: readBool(env, 'PANEL_ENABLED', true, warnings),
+        panelHost: readText(env, 'PANEL_HOST', '127.0.0.1'),
+        panelPort: readNumber(env, 'PANEL_PORT', 3000, warnings, { min: 1, max: 65535 }),
+
+        chromePath: raw(env, 'CHROME_PATH'),
+        headless: readBool(env, 'HEADLESS', true, warnings),
+        logLevel: readLogLevel(env, warnings),
+        stateSaveIntervalMs: readNumber(env, 'STATE_SAVE_INTERVAL_MS', 5000, warnings, { min: 0, max: 600000 }),
+    };
+
+    if (config.dbEnabled && !config.dbName) {
+        warnings.push('DB_ENABLED jest włączone, ale DB_NAME jest puste - zapis do bazy nie ruszy');
+    }
+    if (config.discordPingUserId && !config.discordWebhookUrl) {
+        warnings.push('DISCORD_PING_USER_ID jest ustawione, ale bez DISCORD_WEBHOOK_URL nic nie wyśle');
+    }
+    // Adres podaje się samą nazwą albo samym IP. "http://" z przodu czy
+    // ":3000" na końcu wygląda naturalnie, ale Next tego nie przyjmie
+    // i panel nie wstanie - a komunikat będzie o czymś zupełnie innym.
+    if (config.panelHost && (config.panelHost.includes('/') || /:[0-9]+$/.test(config.panelHost))) {
+        warnings.push(
+            `PANEL_HOST=${config.panelHost} - podaj sam adres, bez http:// i bez portu (port ustawia PANEL_PORT)`,
+        );
+    }
+    if (
+        config.discordWebhookUrl &&
+        !/^https:\/\/(discord\.com|discordapp\.com)\/api\/webhooks\//.test(config.discordWebhookUrl)
+    ) {
+        warnings.push('DISCORD_WEBHOOK_URL nie wygląda na adres webhooka Discorda');
+    }
+
+    return { config, warnings, envFileFound };
+}

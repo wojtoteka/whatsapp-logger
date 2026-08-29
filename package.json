@@ -1,15 +1,30 @@
 {
-  "name": "whatsapp-loger",
-  "version": "1.0.0",
-  "description": "WhatsApp message logger - do celów edukacyjnych",
-  "main": "index.js",
+  "name": "whatsapp-logger",
+  "version": "2.0.0",
+  "description": "Archiwizator wlasnych rozmow WhatsApp do plikow HTML",
+  "main": "dist/index.js",
+  "private": true,
+  "engines": {
+    "node": ">=20.6.0"
+  },
   "scripts": {
-    "start": "node index.js"
+    "build": "tsc",
+    "start": "npm run build && node dist/scripts/uruchom.js",
+    "logger": "npm run build && node dist/index.js",
+    "panel": "cd panel && npm run dev",
+    "panel:build": "cd panel && npm install && npm run build",
+    "test": "npm run build && node --test \"dist/test/*.test.js\"",
+    "typecheck": "tsc --noEmit",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\""
   },
   "dependencies": {
-    "fs-extra": "^11.2.0",
+    "mysql2": "^3.24.2",
     "qrcode-terminal": "^0.12.0",
-    "sanitize-filename": "^1.6.3",
-    "whatsapp-web.js": "^1.26.0"
+    "whatsapp-web.js": "^1.34.6"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/qrcode-terminal": "^0.12.2",
+    "typescript": "^5.6.0"
   }
 }
