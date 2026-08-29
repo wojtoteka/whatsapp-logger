@@ -8,9 +8,12 @@ const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode  = require('qrcode-terminal');
 const fs      = require('fs');
 const { Storage } = require('./src/storage');
+const { runRetention } = require('./src/retention');
+const config  = require('./src/config');
 const discord = require('./src/discord');
 
 const storage = new Storage();
+let retentionTimer = null;
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  Wykrywanie ścieżki Chrome / Chromium (Windows i Linux)
@@ -111,7 +114,36 @@ client.on('auth_failure', async (msg) => {
 client.on('ready', () => {
     console.log('✓ WhatsApp Logger uruchomiony - monitoruję wiadomości...\n');
     discord.notifyReady().catch(() => {});
+    startRetention();
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+//  Kasowanie starych wiadomości
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function sweepOldFiles() {
+    try {
+        await runRetention(storage.logsDir, config.RETENTION_DAYS);
+        await storage.pruneOldPending(config.RETENTION_DAYS);
+    } catch (err) {
+        console.error('Błąd kasowania starych plików:', err.message);
+    }
+}
+
+function startRetention() {
+    if (retentionTimer) return;
+    if (!config.RETENTION_ENABLED || !config.RETENTION_DAYS || config.RETENTION_DAYS <= 0) {
+        console.log('Kasowanie starych wiadomości: wyłączone.');
+        return;
+    }
+
+    const hours = config.RETENTION_CHECK_HOURS > 0 ? config.RETENTION_CHECK_HOURS : 12;
+    console.log(`Kasowanie starych wiadomości: po ${config.RETENTION_DAYS} dniach, sprawdzam co ${hours} h.`);
+
+    sweepOldFiles();
+    retentionTimer = setInterval(sweepOldFiles, hours * 60 * 60 * 1000);
+    if (typeof retentionTimer.unref === 'function') retentionTimer.unref();
+}
 
 client.on('disconnected', async (reason) => {
     console.warn('\nRozłączono:', reason);
@@ -159,6 +191,7 @@ client.on('message_revoke_me', async (message) => {
 
 async function shutdown() {
     console.log('\nZatrzymywanie... Zapisuję oczekujące wiadomości...');
+    if (retentionTimer) clearInterval(retentionTimer);
     try {
         await storage.flushAll();
         await client.destroy();

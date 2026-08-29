@@ -7,7 +7,10 @@ Narzędzie archiwizujące własne rozmowy z WhatsAppa do przeglądalnych plików
 ## Co robi
 
 - **Archiwum w HTML** - wiadomości trafiają do gotowych do czytania plików HTML, dzielonych po 70 wiadomości na plik, w podfolderze per czat.
-- **Pobieranie mediów** - zdjęcia, wideo, audio i naklejki są zapisywane na dysk (domyślny limit 100 MB na plik); typy do pobrania ustawia się w konfiguracji.
+- **Pobieranie mediów** - zdjęcia, filmy, nagrania głosowe, dokumenty i naklejki lądują na dysku (domyślny limit 100 MB na plik); typy do pobrania ustawia się w konfiguracji. Plik pominięty zostawia w archiwum notatkę z typem, nazwą i rozmiarem, więc widać, że coś tam było.
+- **Kasowanie po 180 dniach** - stare pliki HTML i media znikają same, termin ustawiasz w `src/config.js` (`RETENTION_DAYS`, `RETENTION_ENABLED`). Zdjęcia profilowe i pliki stanu zostają.
+- **Lokalizacje, wizytówki, ankiety** - lokalizacja dostaje odnośnik do mapy, wizytówka rozkłada się na imię i numer, ankieta pokazuje pytanie z odpowiedziami.
+- **Zdjęcia profilowe** - pobierane raz na kontakt do `logs/_avatars` i wstawiane obok wiadomości.
 - **Escapowanie treści** - tekst wiadomości jest sanityzowany przed wstawieniem do HTML, więc treść nie rozwali strony ani nie wstrzyknie się jako znacznik.
 - **Bezpieczne nazwy plików** - `sanitize-filename` chroni przed nazwami czatów, które psułyby ścieżki.
 - **Powiadomienia na Discordzie** - o utracie autoryzacji, rozłączeniu czy konieczności zeskanowania QR informuje webhook, z osobnym cooldownem dla każdej kategorii alertu (5 min), żeby nie zasypać kanału.
@@ -23,7 +26,8 @@ Narzędzie archiwizujące własne rozmowy z WhatsAppa do przeglądalnych plików
 index.js                  start, wykrywanie Chrome'a, obsługa QR i zdarzeń klienta
 src/config.js             ustawienia domyślne (bez sekretów)
 src/config.local.js       Twoje prywatne wartości - NIE w repozytorium
-src/storage.js            zapis wiadomości, mediów, podział na partie
+src/storage.js            zapis wiadomości, mediów, podział na partie, kolejka per czat
+src/retention.js          kasowanie plików starszych niż RETENTION_DAYS
 src/htmlTemplate.js       generowanie plików HTML
 src/discord.js            webhook z kolejką i cooldownem per kategoria
 ```
@@ -32,6 +36,7 @@ src/discord.js            webhook z kolejką i cooldownem per kategoria
 
 ```bash
 npm install
+git config core.hooksPath .githooks                  # blokada sekretów przy commicie
 cp src/config.local.example.js src/config.local.js   # opcjonalnie: webhook Discorda
 node index.js
 ```
@@ -47,5 +52,9 @@ Trzy rzeczy nigdy nie trafiają do repozytorium i są zablokowane w `.gitignore`
 | `logs/` | Zarchiwizowane rozmowy i pobrane media |
 | `.wwebjs_auth/`, `.wwebjs_cache/` | Dane sesji WhatsAppa - dostęp do konta |
 | `src/config.local.js` | Webhook Discorda, hasło do zablokowanych czatów |
+
+Sekrety mają jedno miejsce: `src/config.local.js`, według wzoru z `src/config.local.example.js`. W śledzonym `src/config.js` nie ma na nie pól, więc nie da się ich tam wpisać przez pomyłkę, a przy okazji nie ma czego mylić z prawdziwą konfiguracją. Gdyby ktoś takie pole dopisał, zatrzymają go dwie rzeczy: hook `.githooks/pre-commit` wstrzyma commit z wypełnioną wartością wrażliwą albo z adresem webhooka Discorda, a program przy starcie wypisze ostrzeżenie, gdyby hook był wyłączony lub pominięty przez `--no-verify`. Po świeżym klonie hook trzeba włączyć komendą `git config core.hooksPath .githooks`, git nie robi tego sam.
+
+Bez `config.local.js` logger startuje normalnie, po prostu bez powiadomień na Discordzie.
 
 Konfiguracja jest warstwowa: `config.js` (wartości domyślne, publiczne) → `config.local.js` (Twoje sekrety) → zmienne środowiskowe (najwyższy priorytet). Bez `config.local.js` logger nadal działa, tyle że bez powiadomień na Discordzie.

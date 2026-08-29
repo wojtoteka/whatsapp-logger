@@ -84,7 +84,7 @@ async function notify(title, description, color = 0xff0000, ping = false, catego
         try {
             url = new URL(webhookUrl);
         } catch {
-            console.error('[Discord] Nieprawidłowy DISCORD_WEBHOOK_URL w config.js');
+            console.error('[Discord] Nieprawidłowy DISCORD_WEBHOOK_URL w src/config.local.js');
             return resolve();
         }
 
