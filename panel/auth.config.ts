@@ -21,6 +21,26 @@ export const authConfig = {
     // inaczej po zalogowaniu przekierowałby na zły adres.
     trustHost: true,
 
+    // Auth.js domyślnie drukuje cały stos dla każdej odmowy logowania. Niżej
+    // wypisujemy już konkretny, krótki powód (brak konta, hasło albo baza),
+    // więc oczekiwanego CredentialsSignin nie ma sensu powielać ścianą tekstu.
+    logger: {
+        error(error) {
+            const type =
+                'type' in error && typeof error.type === 'string' ? error.type : error.name;
+            if (type === 'CredentialsSignin') return;
+
+            const cause = error.cause as { err?: unknown } | undefined;
+            const detail =
+                cause?.err instanceof Error
+                    ? `: ${cause.err.message}`
+                    : error.message
+                      ? `: ${error.message}`
+                      : '';
+            console.error(`[panel] Auth.js (${type})${detail}`);
+        },
+    },
+
     // Dostawcy dochodzą w auth.ts - tutaj ich nie ma, bo ciągną za sobą bazę.
     providers: [],
 

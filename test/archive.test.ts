@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { Archive, archiveMessageId, formatMessageLine } from '../src/archive';
+import type { BackfillProgress } from '../src/archive';
 import { log } from '../src/log';
 import type { ChatStateFile } from '../src/types';
 import { fakeClient, fakeMessage, testConfig, withTempDir } from './helpers';
@@ -238,13 +239,15 @@ test('nadrabianie przegląda poprzednie czaty i dopisuje tylko brakujące wiadom
                         return [missing, old];
                     },
                 },
-            ] as Awaited<ReturnType<typeof client.getChats>>;
+            ] as unknown as Awaited<ReturnType<typeof client.getChats>>;
 
         const archive = new Archive(testConfig(dir, { messagesPerFile: 100 }), client);
         await archive.save(old);
 
         assert.deepEqual(await archive.backfillRecent(25), {
             chats: 1,
+            skippedNewChats: 0,
+            listingFailed: false,
             scanned: 2,
             saved: 1,
             skipped: 1,
@@ -255,6 +258,8 @@ test('nadrabianie przegląda poprzednie czaty i dopisuje tylko brakujące wiadom
 
         assert.deepEqual(await archive.backfillRecent(25), {
             chats: 1,
+            skippedNewChats: 0,
+            listingFailed: false,
             scanned: 2,
             saved: 0,
             skipped: 2,
@@ -266,6 +271,111 @@ test('nadrabianie przegląda poprzednie czaty i dopisuje tylko brakujące wiadom
             state.pendingMessages.map((message) => message.body),
             ['już mam', 'do nadrobienia'],
         );
+    });
+});
+
+test('zwykłe nadrabianie pomija czat bez folderu, a jawny tryb może go założyć', async () => {
+    await withTempDir(async (dir) => {
+        const message = fakeMessage({
+            id: 'historyczna',
+            from: '999@lid',
+            body: 'wiadomość sprzed uruchomienia',
+            timestamp: 10,
+        });
+        let fetchCalls = 0;
+        const client = fakeClient({ lidToPhone: { '999@lid': '5550100@c.us' } });
+        client.getChats = async () =>
+            [
+                {
+                    id: { _serialized: '999@lid' },
+                    fetchMessages: async () => {
+                        fetchCalls++;
+                        return [message];
+                    },
+                },
+            ] as unknown as Awaited<ReturnType<typeof client.getChats>>;
+
+        const archive = new Archive(testConfig(dir), client);
+        const progress: BackfillProgress[] = [];
+
+        assert.deepEqual(await archive.backfillRecent(25), {
+            chats: 0,
+            skippedNewChats: 1,
+            listingFailed: false,
+            scanned: 0,
+            saved: 0,
+            skipped: 0,
+            failedChats: 0,
+        });
+        assert.equal(fetchCalls, 0);
+        assert.deepEqual(await listFiles(dir), []);
+
+        assert.deepEqual(
+            await archive.backfillRecent(25, {
+                includeNewChats: true,
+                onProgress: (event) => progress.push(event),
+            }),
+            {
+                chats: 1,
+                skippedNewChats: 0,
+                listingFailed: false,
+                scanned: 1,
+                saved: 1,
+                skipped: 0,
+                failedChats: 0,
+            },
+        );
+        assert.equal(fetchCalls, 1);
+        assert.deepEqual(await listFiles(dir), ['5550100', '_czaty.json']);
+        assert.equal(progress[0]?.percent, 0);
+        assert.equal(progress.at(-1)?.percent, 100);
+        assert.ok(progress.some((event) => event.stage === 'fetching'));
+        assert.ok(progress.some((event) => event.stage === 'saving'));
+    });
+});
+
+test('nadrabianie rozwija czaty pojedynczo, gdy zbiorcze getChats jest uszkodzone', async () => {
+    await withTempDir(async (dir) => {
+        const message = fakeMessage({
+            id: 'do-odzyskania',
+            from: '999@lid',
+            body: 'odzyskana mimo wadliwego czatu',
+        });
+        const client = fakeClient({ lidToPhone: { '999@lid': '5550100@c.us' } });
+        let getChatsCalls = 0;
+        let getChatByIdCalls = 0;
+
+        client.pupPage = {
+            evaluate: async () => ['999@lid', 'wadliwy@g.us'],
+        } as unknown as NonNullable<typeof client.pupPage>;
+        client.getChats = async () => {
+            getChatsCalls++;
+            throw new Error('r: r');
+        };
+        client.getChatById = async (id: string) => {
+            getChatByIdCalls++;
+            if (id === 'wadliwy@g.us') throw new Error('r: r');
+            return {
+                id: { _serialized: id },
+                fetchMessages: async () => [message],
+            } as unknown as Awaited<ReturnType<typeof client.getChatById>>;
+        };
+
+        const archive = new Archive(testConfig(dir), client);
+        assert.deepEqual(
+            await archive.backfillRecent(25, { includeNewChats: true }),
+            {
+                chats: 1,
+                skippedNewChats: 0,
+                listingFailed: false,
+                scanned: 1,
+                saved: 1,
+                skipped: 0,
+                failedChats: 1,
+            },
+        );
+        assert.equal(getChatsCalls, 0);
+        assert.equal(getChatByIdCalls, 2);
     });
 });
 

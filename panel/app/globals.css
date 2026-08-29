@@ -50,6 +50,19 @@ body {
     );
 }
 
+/* Lokalne SVG Material Symbols używane jako maski, dzięki czemu ikona
+   automatycznie przyjmuje kolor otaczającego tekstu. */
+.material-icon {
+    display: inline-block;
+    width: 1em;
+    height: 1em;
+    flex: 0 0 auto;
+    background-color: currentColor;
+    -webkit-mask: var(--material-icon) center / contain no-repeat;
+    mask: var(--material-icon) center / contain no-repeat;
+    vertical-align: -0.125em;
+}
+
 a {
     color: var(--sea);
     text-underline-offset: 2px;
@@ -133,7 +146,9 @@ a:hover {
 .tab .count {
     font-family: var(--mono);
     font-size: 11.5px;
+    line-height: 1;
     opacity: 0.75;
+    transform: translateY(1.5px);
 }
 
 .page-title {
@@ -290,6 +305,10 @@ a:hover {
 .back:hover {
     color: var(--sea);
 }
+.back .material-icon,
+.pager .material-icon {
+    font-size: 16px;
+}
 
 /* ── Wiadomości ─────────────────────────────────────────────────────── */
 
@@ -378,6 +397,9 @@ a:hover {
     color: var(--dim);
     margin-bottom: 4px;
 }
+.flag .material-icon {
+    font-size: 15px;
+}
 
 .gone {
     display: flex;
@@ -388,6 +410,9 @@ a:hover {
     border-top: 1px solid var(--edge);
     font-size: 12.5px;
     color: #f08a7c;
+}
+.gone .material-icon {
+    font-size: 17px;
 }
 
 .quote {
@@ -452,8 +477,16 @@ a:hover {
     margin: 2px 0 6px;
     font-size: 14px;
 }
+.file-link .material-icon,
+.skipped .material-icon {
+    font-size: 19px;
+    margin-top: 1px;
+}
 
 .skipped {
+    display: flex;
+    align-items: flex-start;
+    gap: 9px;
     border: 1px dashed var(--edge-strong);
     border-radius: 7px;
     padding: 8px 11px;
@@ -627,6 +660,15 @@ a:hover {
     background: none;
     font-family: inherit;
     cursor: pointer;
+}
+.tab.logout .login-name {
+    font-size: 15px;
+    font-weight: 500;
+    line-height: 1;
+}
+.tab.logout .logout-icon {
+    font-size: 17px;
+    line-height: 1;
 }
 .tab.logout:hover {
     border-color: #f08a7c;

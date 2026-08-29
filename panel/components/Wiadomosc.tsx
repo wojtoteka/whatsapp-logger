@@ -2,6 +2,7 @@ import { fileUrl, toArchivePath } from '@/lib/archiwum';
 import { formatBytes, formatTime, isoDate, mediaKind, senderTone, typeName } from '@/lib/format';
 import type { ArchivedMessage } from '@/lib/typy';
 import { Awatar } from './Awatar';
+import { MaterialIcon } from './MaterialIcon';
 import { Tresc } from './Tresc';
 
 interface Props {
@@ -27,7 +28,12 @@ export function Wiadomosc({ message, folder }: Props) {
             <div className="bubble">
                 {!own && <p className={`who ${senderTone(message.from)}`}>{message.from}</p>}
 
-                {message.isForwarded && <p className="flag">↪ Przekazana dalej</p>}
+                {message.isForwarded && (
+                    <p className="flag">
+                        <MaterialIcon name="forward" />
+                        <span>Przekazana dalej</span>
+                    </p>
+                )}
 
                 {message.quotedMsg && (
                     <blockquote className="quote">
@@ -48,7 +54,12 @@ export function Wiadomosc({ message, folder }: Props) {
                     </div>
                 )}
 
-                {deleted && <p className="gone">🗑 Skasowana w WhatsAppie. Treść została w archiwum.</p>}
+                {deleted && (
+                    <p className="gone">
+                        <MaterialIcon name="delete" />
+                        <span>Skasowana w WhatsAppie. Treść została w archiwum.</span>
+                    </p>
+                )}
 
                 <p className="stamp">
                     <time dateTime={isoDate(message.timestamp)}>{formatTime(message.timestamp)}</time>
@@ -95,7 +106,7 @@ function Media({ message, folder }: Props) {
     const name = message.mediaName ?? message.mediaPath.split(/[\\/]/).pop();
     return (
         <p className="file-link">
-            📎{' '}
+            <MaterialIcon name="attachment" />
             <a href={url} download>
                 {name}
             </a>
@@ -115,8 +126,11 @@ function Pominiete({ message }: { message: ArchivedMessage }) {
 
     return (
         <p className="skipped">
-            📎 Nie zapisano pliku: {parts.join(', ')}.<br />
-            Powód: {meta.reason || 'nieznany'}.
+            <MaterialIcon name="attachment" />
+            <span>
+                Nie zapisano pliku: {parts.join(', ')}.<br />
+                Powód: {meta.reason || 'nieznany'}.
+            </span>
         </p>
     );
 }

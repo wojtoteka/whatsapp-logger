@@ -12,6 +12,20 @@ export interface PanelUser {
 }
 
 let pool: mysql.Pool | null = null;
+let lastDatabaseErrorAt = 0;
+
+/**
+ * Błąd SQL nie może wyglądać w konsoli jak zwykła pomyłka w haśle. Nie
+ * wypisujemy konfiguracji ani parametrów zapytania, tylko komunikat sterownika.
+ */
+function reportDatabaseError(context: string, error: unknown): void {
+    const now = Date.now();
+    if (now - lastDatabaseErrorAt < 30_000) return;
+    lastDatabaseErrorAt = now;
+
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[panel] Baza danych (${context}): ${message}`);
+}
 
 /** Jedna pula na proces - Next.js trzyma moduły między żądaniami. */
 function getPool(): mysql.Pool {
@@ -49,8 +63,14 @@ export async function verifyUser(login: string, password: string): Promise<Panel
         );
 
         const user = rows[0];
-        if (!user) return null;
-        if (!(await verifyPassword(password, user.password_hash))) return null;
+        if (!user) {
+            console.warn('[panel] Logowanie odrzucone: tego loginu nie ma w bazie używanej przez panel.');
+            return null;
+        }
+        if (!(await verifyPassword(password, user.password_hash))) {
+            console.warn('[panel] Logowanie odrzucone: hasło nie pasuje do zapisanego skrótu.');
+            return null;
+        }
 
         // Data ostatniego logowania to wygoda przy przeglądaniu bazy -
         // nieudany zapis nie ma prawa zablokować samego logowania.
@@ -59,8 +79,10 @@ export async function verifyUser(login: string, password: string): Promise<Panel
             .catch(() => undefined);
 
         return { id: user.id, login: user.login };
-    } catch {
-        // Baza niedostępna - logowanie po prostu się nie uda.
+    } catch (error) {
+        // Użytkownik nadal dostaje ogólną odmowę, ale administrator widzi w
+        // konsoli, że zawiodła baza, a nie wpisane dane logowania.
+        reportDatabaseError('logowanie', error);
         return null;
     }
 }
@@ -72,7 +94,8 @@ export async function hasAnyUser(): Promise<boolean> {
             'SELECT 1 FROM panel_users LIMIT 1',
         );
         return rows.length > 0;
-    } catch {
+    } catch (error) {
+        reportDatabaseError('sprawdzanie kont', error);
         return false;
     }
 }

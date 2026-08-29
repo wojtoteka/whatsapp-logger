@@ -19,5 +19,12 @@ test('flaga zamieniona przez npm na zmienną środowiskową wraca przed argument
 test('tryby administracyjne są jednorazowe, zwykły start nie', () => {
     assert.equal(isOneShot(['--sprawdz']), true);
     assert.equal(isOneShot(['--sprawdz-archiwum']), true);
+    assert.equal(isOneShot(['--nadrob-wszystko']), true);
     assert.equal(isOneShot([]), false);
+});
+
+test('npm może przekazać jednorazowe nadrabianie przez npm_config', () => {
+    assert.deepEqual(normalizeCliArgs([], { npm_config_nadrob_wszystko: 'true' }), [
+        '--nadrob-wszystko',
+    ]);
 });

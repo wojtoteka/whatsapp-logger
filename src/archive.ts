@@ -110,9 +110,35 @@ export interface StatusSweepStats {
 
 export interface BackfillStats {
     chats: number;
+    /** Czaty bez istniejącego folderu pominięte podczas zwykłego startu. */
+    skippedNewChats: number;
+    /** Nie udało się nawet ustalić listy czatów. */
+    listingFailed: boolean;
     scanned: number;
     saved: number;
     skipped: number;
+    failedChats: number;
+}
+
+export interface BackfillOptions {
+    /** true pozwala utworzyć foldery dla czatów, których nie ma w archiwum. */
+    includeNewChats?: boolean;
+    /** Postęp dla trybu interaktywnego, np. --nadrob-wszystko. */
+    onProgress?: (progress: BackfillProgress) => void;
+}
+
+export interface BackfillProgress {
+    percent: number;
+    stage: 'listing' | 'opening' | 'syncing' | 'fetching' | 'saving' | 'done';
+    detail: string;
+    chat?: string;
+}
+
+type BackfillChat = Awaited<ReturnType<WaClient['getChats']>>[number];
+
+interface BackfillChatList {
+    chats: BackfillChat[];
+    skippedNewChats: number;
     failedChats: number;
 }
 
@@ -335,13 +361,20 @@ export class Archive {
     // ─────────────────────────────────────────────────────────────────────
 
     /**
-     * Przegląda ostatnie wiadomości każdego czatu widocznego dla WhatsApp
-     * Weba. save() prowadzi je tą samą ścieżką co zdarzenia na żywo, więc
+     * Przegląda ostatnie wiadomości czatów widocznych dla WhatsApp Weba.
+     * Zwykły start dotyka tylko istniejącego archiwum; jawna komenda może
+     * włączyć includeNewChats i założyć foldery także dla pozostałych.
+     * save() prowadzi wiadomości tą samą ścieżką co zdarzenia na żywo, więc
      * media, baza, nazwy i deduplikacja zachowują się identycznie.
      */
-    async backfillRecent(limit = this.config.backfillMessagesPerChat): Promise<BackfillStats> {
+    async backfillRecent(
+        limit = this.config.backfillMessagesPerChat,
+        options: BackfillOptions = {},
+    ): Promise<BackfillStats> {
         const stats: BackfillStats = {
             chats: 0,
+            skippedNewChats: 0,
+            listingFailed: false,
             scanned: 0,
             saved: 0,
             skipped: 0,
@@ -350,23 +383,63 @@ export class Archive {
         const wanted = Math.max(0, Math.floor(limit));
         if (wanted === 0 || typeof this.client.getChats !== 'function') return stats;
 
-        let chats;
+        const progress = (
+            percent: number,
+            stage: BackfillProgress['stage'],
+            detail: string,
+            chat?: string,
+        ): void => {
+            options.onProgress?.({
+                percent: Math.max(0, Math.min(100, Math.round(percent))),
+                stage,
+                detail,
+                ...(chat ? { chat } : {}),
+            });
+        };
+
+        progress(0, 'listing', 'pobieram listę czatów');
+
+        let listed: BackfillChatList;
         try {
-            chats = await this.client.getChats();
+            listed = await this.chatsForBackfill(
+                options.includeNewChats === true,
+                (current, total, chat) => {
+                    const percent = total > 0 ? (current / total) * 10 : 10;
+                    progress(percent, 'opening', `otwieram czat ${current}/${total}`, chat);
+                },
+            );
         } catch (err) {
+            stats.listingFailed = true;
             log.error('Nie udało się pobrać czatów do nadrobienia', err, {
-                stage: 'nadrabianie: getChats',
+                stage: 'nadrabianie: lista czatów',
             });
             return stats;
         }
-        stats.chats = chats.length;
+        stats.skippedNewChats = listed.skippedNewChats;
+        stats.failedChats = listed.failedChats;
 
-        for (const chat of chats) {
+        if (listed.chats.length === 0) {
+            progress(100, 'done', 'brak czatów do przetworzenia');
+            return stats;
+        }
+
+        const chatTotal = listed.chats.length;
+        for (const [chatIndex, chat] of listed.chats.entries()) {
             const chatId = chat.id?._serialized ?? null;
+            const chatName = chat.name?.trim() || chatId || 'nieznany czat';
+            const chatStart = 10 + (chatIndex / chatTotal) * 90;
+            const chatShare = 90 / chatTotal;
+            stats.chats++;
             try {
                 // Prosimy urządzenie główne o świeżą historię, ale brak tej
                 // możliwości nie blokuje odczytu tego, co już ma Web.
                 if (typeof chat.syncHistory === 'function') {
+                    progress(
+                        chatStart + chatShare * 0.1,
+                        'syncing',
+                        `synchronizuję historię (${chatIndex + 1}/${chatTotal})`,
+                        chatName,
+                    );
                     try {
                         await chat.syncHistory();
                     } catch (err) {
@@ -374,21 +447,159 @@ export class Archive {
                     }
                 }
 
+                progress(
+                    chatStart + chatShare * 0.25,
+                    'fetching',
+                    `pobieram do ${wanted} wiadomości (${chatIndex + 1}/${chatTotal})`,
+                    chatName,
+                );
                 const messages = (await chat.fetchMessages({ limit: wanted })) as WaMessage[];
                 messages.sort((a, b) => a.timestamp - b.timestamp);
 
-                for (const message of messages) {
+                for (const [messageIndex, message] of messages.entries()) {
+                    if (
+                        messageIndex === 0 ||
+                        messageIndex === messages.length - 1 ||
+                        messageIndex % 10 === 0
+                    ) {
+                        const messagePart =
+                            messages.length > 0 ? (messageIndex + 1) / messages.length : 1;
+                        progress(
+                            chatStart + chatShare * (0.3 + messagePart * 0.7),
+                            'saving',
+                            `zapisuję wiadomości ${messageIndex + 1}/${messages.length} ` +
+                                `(${chatIndex + 1}/${chatTotal} czatów)`,
+                            chatName,
+                        );
+                    }
                     stats.scanned++;
                     if (await this.save(message)) stats.saved++;
                     else stats.skipped++;
                 }
+                progress(
+                    chatStart + chatShare,
+                    'saving',
+                    `zakończono czat ${chatIndex + 1}/${chatTotal}`,
+                    chatName,
+                );
             } catch (err) {
                 stats.failedChats++;
                 log.quiet(err, { stage: 'nadrabianie czatu', chat: chatId });
+                progress(
+                    chatStart + chatShare,
+                    'saving',
+                    `pominięto czat z błędem ${chatIndex + 1}/${chatTotal}`,
+                    chatName,
+                );
             }
         }
 
+        progress(100, 'done', 'zapis zakończony');
         return stats;
+    }
+
+    /**
+     * getChats() w whatsapp-web.js serializuje wszystkie czaty równolegle.
+     * Jeden wadliwy model (obecnie najczęściej grupa) odrzuca wtedy całą
+     * listę krótkim błędem "r: r". Jeśli mamy dostęp do strony, pobieramy
+     * więc najpierw same identyfikatory i rozwijamy czaty pojedynczo. Jeden
+     * problematyczny czat nie blokuje dzięki temu wszystkich pozostałych.
+     *
+     * Klienci testowi i przyszłe wersje biblioteki bez pupPage korzystają z
+     * publicznego getChats() jako bezpiecznego planu B.
+     */
+    private async chatsForBackfill(
+        includeNewChats: boolean,
+        onOpening?: (current: number, total: number, chat: string) => void,
+    ): Promise<BackfillChatList> {
+        const result: BackfillChatList = {
+            chats: [],
+            skippedNewChats: 0,
+            failedChats: 0,
+        };
+
+        const ids = await this.rawChatIds();
+        if (ids) {
+            const selected: string[] = [];
+            for (const chatId of ids) {
+                if (!includeNewChats && !(await this.hasExistingChatFolder(chatId))) {
+                    result.skippedNewChats++;
+                    continue;
+                }
+                selected.push(chatId);
+            }
+
+            for (const [index, chatId] of selected.entries()) {
+                try {
+                    const chat = await this.client.getChatById(chatId);
+                    if (chat) {
+                        result.chats.push(chat);
+                        onOpening?.(index + 1, selected.length, chat.name?.trim() || chatId);
+                    } else {
+                        result.failedChats++;
+                        onOpening?.(index + 1, selected.length, chatId);
+                    }
+                } catch (err) {
+                    result.failedChats++;
+                    log.quiet(err, { stage: 'nadrabianie: pobranie czatu', chat: chatId });
+                    onOpening?.(index + 1, selected.length, chatId);
+                }
+            }
+            return result;
+        }
+
+        const chats = await this.client.getChats();
+        for (const chat of chats) {
+            const chatId = chat.id?._serialized ?? null;
+            if (!includeNewChats && (!chatId || !(await this.hasExistingChatFolder(chatId)))) {
+                result.skippedNewChats++;
+                continue;
+            }
+            result.chats.push(chat);
+            onOpening?.(result.chats.length, chats.length, chat.name?.trim() || chatId || 'nieznany czat');
+        }
+        return result;
+    }
+
+    /** Same ID czatów, bez zawodnej serializacji pełnych modeli. */
+    private async rawChatIds(): Promise<string[] | null> {
+        const page = this.client.pupPage;
+        if (!page || typeof page.evaluate !== 'function') return null;
+
+        try {
+            const ids = await page.evaluate((): string[] | null => {
+                /* eslint-disable @typescript-eslint/no-explicit-any */
+                const root = globalThis as any;
+                const store = root.window?.Store ?? root.Store;
+                if (!store?.Chat?.getModelsArray) return null;
+
+                return store.Chat.getModelsArray()
+                    .map((chat: any) => chat?.id?._serialized)
+                    .filter((id: unknown): id is string => typeof id === 'string' && id.length > 0);
+                /* eslint-enable @typescript-eslint/no-explicit-any */
+            });
+            return ids ? [...new Set(ids)] : null;
+        } catch (err) {
+            log.quiet(err, { stage: 'nadrabianie: surowa lista ID czatów' });
+            return null;
+        }
+    }
+
+    /**
+     * Czy czat ma już przypisany, faktycznie istniejący folder. Sam wpis w
+     * _czaty.json nie wystarcza: folder mógł zostać ręcznie usunięty.
+     * Uwzględniamy też stare archiwa nazwane samymi cyframi, sprzed spisu.
+     */
+    private async hasExistingChatFolder(chatId: string): Promise<boolean> {
+        const known = this.index.get(chatId);
+        if (
+            known?.safeName &&
+            (await pathExists(path.join(this.config.logsDir, known.safeName)))
+        ) {
+            return true;
+        }
+
+        return (await this.findLegacyFolder(chatId, chatId)) !== null;
     }
 
     private async quotedInfo(message: WaMessage): Promise<QuotedInfo | null> {

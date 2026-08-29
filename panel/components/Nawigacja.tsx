@@ -2,6 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+import { MaterialIcon } from './MaterialIcon';
 
 interface Props {
     rozmowy: number;
@@ -49,7 +50,8 @@ export function Nawigacja({ rozmowy, relacje, login, wyloguj }: Props) {
 
                 <form action={wyloguj}>
                     <button type="submit" className="tab logout" title={`Zalogowany jako ${login}`}>
-                        {login} <span aria-hidden="true">×</span>
+                        <span className="login-name">{login}</span>
+                        <MaterialIcon name="logout" className="logout-icon" />
                     </button>
                 </form>
             </nav>

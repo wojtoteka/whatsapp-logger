@@ -100,10 +100,6 @@ function startLogger(): void {
 }
 
 function startPanel(logsDir: string, host: string, port: number): void {
-    // Panel bez zbudowanych stron nie wystartuje, więc przy pierwszym
-    // uruchomieniu budujemy go sami, zamiast wywalać się z błędem.
-    const built = fs.existsSync(path.join(PANEL_DIR, '.next', 'BUILD_ID'));
-
     const env = {
         ...process.env,
         LOGS_DIR: logsDir,
@@ -111,28 +107,26 @@ function startPanel(logsDir: string, host: string, port: number): void {
         PORT: String(port),
     };
 
-    if (!built) {
-        console.log('[panel] pierwsze uruchomienie - buduję panel, to potrwa chwilę...');
-        const build = spawn(process.execPath, [NEXT_BIN, 'build'], {
-            cwd: PANEL_DIR,
-            env,
-            stdio: 'ignore',
-        });
+    // Budujemy przy każdym zwykłym npm start. Dzięki temu zmiana w panelu nie
+    // zostaje przykryta starym panel/.next tylko dlatego, że BUILD_ID już był.
+    // Zależności muszą istnieć, ale npm install nie jest tutaj uruchamiane.
+    console.log('[panel] buduję aktualną wersję...');
+    const build = spawn(process.execPath, [NEXT_BIN, 'build'], {
+        cwd: PANEL_DIR,
+        env,
+        stdio: 'ignore',
+    });
 
-        build.on('exit', (code) => {
-            if (stopping) return;
-            if (code !== 0) {
-                console.error(`[panel] budowanie nie powiodło się (kod ${String(code)}).`);
-                console.error('[panel] spróbuj ręcznie: cd panel && npm install && npm run build');
-                return;
-            }
-            console.log('[panel] zbudowany.');
-            runPanel(env, host, port);
-        });
-        return;
-    }
-
-    runPanel(env, host, port);
+    build.on('exit', (code) => {
+        if (stopping) return;
+        if (code !== 0) {
+            console.error(`[panel] budowanie nie powiodło się (kod ${String(code)}).`);
+            console.error('[panel] spróbuj ręcznie: cd panel && npm install && npm run build');
+            return;
+        }
+        console.log('[panel] zbudowany.');
+        runPanel(env, host, port);
+    });
 }
 
 function runPanel(env: NodeJS.ProcessEnv, host: string, port: number): void {

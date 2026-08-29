@@ -9,6 +9,7 @@
 import path from 'node:path';
 import qrcode from 'qrcode-terminal';
 import { Archive } from './src/archive';
+import type { BackfillStats } from './src/archive';
 import { checkArchive } from './src/archiveCheck';
 import { loadConfig } from './src/config';
 import { Database } from './src/db';
@@ -90,6 +91,9 @@ async function main(): Promise<void> {
         return;
     }
 
+    const backfillAll =
+        process.argv.includes('--nadrob-wszystko') || process.argv.includes('--backfill-all');
+
     const db = new Database(config);
     if (config.dbEnabled) {
         const result = await db.connect();
@@ -100,7 +104,7 @@ async function main(): Promise<void> {
     const client = createClient(config, ROOT_DIR);
     const archive = new Archive(config, client, config.dbEnabled ? db : null);
 
-    const runtime = new Runtime(config, client, archive, notifier, db);
+    const runtime = new Runtime(config, client, archive, notifier, db, backfillAll);
     runtime.wire();
 
     log.info('Łączę z WhatsApp Web...');
@@ -114,6 +118,8 @@ async function main(): Promise<void> {
 class Runtime {
     private retentionTimer: NodeJS.Timeout | null = null;
     private sweepTimer: NodeJS.Timeout | null = null;
+    private readyFallbackTimer: NodeJS.Timeout | null = null;
+    private readyStarted = false;
     private shuttingDown = false;
     /** Ostatni wynik odsłaniania zabezpieczonych czatów. */
     private locked: UnlockResult | null = null;
@@ -124,6 +130,8 @@ class Runtime {
         private readonly archive: Archive,
         private readonly notifier: Notifier,
         private readonly db: Database,
+        /** Jednorazowy tryb, który może założyć foldery dla wszystkich czatów. */
+        private readonly backfillAll: boolean,
     ) {}
 
     wire(): void {
@@ -155,6 +163,7 @@ class Runtime {
         this.client.on('authenticated', () => {
             log.endProgress();
             log.once('auth', '✓ Uwierzytelnienie przyjęte.', 'info');
+            this.scheduleReadyFallback();
         });
 
         this.client.on('auth_failure', (message) => {
@@ -171,8 +180,33 @@ class Runtime {
         });
 
         this.client.on('ready', () => {
+            this.clearReadyFallback();
             void this.onReady();
         });
+    }
+
+    /**
+     * W niektórych wydaniach WhatsApp Web biblioteka potwierdza autoryzację,
+     * ale nie emituje później ready, mimo że Store już działa. Nie czekamy
+     * wtedy bez końca: po chwili uruchamiamy tę samą kontrolowaną ścieżkę.
+     */
+    private scheduleReadyFallback(): void {
+        if (this.readyStarted || this.readyFallbackTimer || this.shuttingDown) return;
+
+        log.info('Czekam na gotowość danych WhatsApp Web...');
+        this.readyFallbackTimer = setTimeout(() => {
+            this.readyFallbackTimer = null;
+            if (this.readyStarted || this.shuttingDown) return;
+            log.warn('WhatsApp Web nie zgłosił gotowości - próbuję kontynuować awaryjnie.');
+            void this.onReady();
+        }, 15_000);
+        this.readyFallbackTimer.unref?.();
+    }
+
+    private clearReadyFallback(): void {
+        if (!this.readyFallbackTimer) return;
+        clearTimeout(this.readyFallbackTimer);
+        this.readyFallbackTimer = null;
     }
 
     /**
@@ -181,9 +215,19 @@ class Runtime {
      * zrobimy, czekamy na książkę adresową.
      */
     private async onReady(): Promise<void> {
+        if (this.shuttingDown || this.readyStarted) return;
+        this.readyStarted = true;
+        this.clearReadyFallback();
+
         const health = await waitForContacts(this.client, {
             onProgress: (state) => {
-                if (state.contacts > 0) log.progress(`Synchronizacja: ${state.contacts} kontaktów...`);
+                if (state.contacts > 0) {
+                    log.progress(`Synchronizacja: ${state.contacts} kontaktów...`);
+                } else if (state.store) {
+                    log.progress(`Synchronizacja: czekam na kontakty (${state.chats} czatów)...`);
+                } else {
+                    log.progress('Synchronizacja: czekam na dane WhatsApp Web...');
+                }
             },
         });
         log.endProgress();
@@ -204,7 +248,18 @@ class Runtime {
 
         await this.tryUnlockLockedChats();
 
-        await this.backfillMessages();
+        const backfill = await this.backfillMessages(this.backfillAll);
+
+        if (this.backfillAll) {
+            const failed = backfill?.listingFailed === true || (backfill?.failedChats ?? 0) > 0;
+            if (failed) {
+                log.error('Nadrabianie zakończone z błędami - sprawdź podsumowanie powyżej.');
+            } else {
+                log.info('✓ Nadrabianie wszystkich dostępnych czatów zakończone.');
+            }
+            await this.shutdown('polecenie --nadrob-wszystko', failed ? 1 : 0);
+            return;
+        }
 
         log.info('✓ Archiwizuję wiadomości. Zatrzymanie: Ctrl+C.');
         log.blank();
@@ -215,21 +270,43 @@ class Runtime {
     }
 
     /** Dobiera wiadomości z czasu, gdy proces nie działał. */
-    private async backfillMessages(): Promise<void> {
+    private async backfillMessages(includeNewChats: boolean): Promise<BackfillStats | null> {
         if (this.config.backfillMessagesPerChat <= 0) {
             log.info('Nadrabianie wiadomości: wyłączone.');
-            return;
+            return null;
         }
 
         log.info(
-            `Nadrabianie wiadomości: sprawdzam do ${this.config.backfillMessagesPerChat} na czat...`,
+            includeNewChats
+                ? `Nadrabianie wiadomości: sprawdzam do ${this.config.backfillMessagesPerChat} na każdy dostępny czat...`
+                : `Nadrabianie wiadomości: sprawdzam do ${this.config.backfillMessagesPerChat} w czatach obecnych w archiwum...`,
         );
-        const stats = await this.archive.backfillRecent();
+        const stats = await this.archive.backfillRecent(undefined, {
+            includeNewChats,
+            ...(includeNewChats
+                ? {
+                      onProgress: (progress) => {
+                          const chat = progress.chat ? ` - ${consoleLabel(progress.chat)}` : '';
+                          log.progress(
+                              `Nadrabianie ${String(progress.percent).padStart(3, ' ')}%: ` +
+                                  `${progress.detail}${chat}`,
+                          );
+                      },
+                  }
+                : {}),
+        });
+        if (includeNewChats) log.endProgress();
         const failed = stats.failedChats > 0 ? `, błędów czatów ${stats.failedChats}` : '';
+        const newChats =
+            stats.skippedNewChats > 0
+                ? `, pominiętych czatów bez folderu ${stats.skippedNewChats}`
+                : '';
         log.info(
             `Nadrabianie wiadomości: dopisano ${stats.saved}, ` +
-                `już zapisanych ${stats.skipped}, przejrzano ${stats.scanned} w ${stats.chats} czatach${failed}.`,
+                `już zapisanych ${stats.skipped}, przejrzano ${stats.scanned} ` +
+                `w ${stats.chats} czatach${newChats}${failed}.`,
         );
+        return stats;
     }
 
     /** Kończy proces kodem, który nadzorca rozpoznaje jako awarię przejściową. */
@@ -395,6 +472,7 @@ class Runtime {
 
         if (this.retentionTimer) clearInterval(this.retentionTimer);
         if (this.sweepTimer) clearInterval(this.sweepTimer);
+        this.clearReadyFallback();
 
         try {
             await this.archive.flushAll();
@@ -467,6 +545,11 @@ function printConfig(config: Config, envFileFound: boolean): void {
 function isFinalUnlock(result: UnlockResult | null): boolean {
     if (!result) return false;
     return ['disabled', 'granted', 'invalid_password', 'unsupported'].includes(result.status);
+}
+
+/** Nazwa z WhatsAppa nie może rozbić jednej linii postępu ani wstrzyknąć ANSI. */
+function consoleLabel(value: string): string {
+    return value.replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ').trim().slice(0, 70);
 }
 
 main().catch((err: unknown) => {

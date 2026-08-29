@@ -3,6 +3,7 @@ import { notFound } from 'next/navigation';
 import { fromSlug, loadChat, loadMessages } from '@/lib/archiwum';
 import { formatDate, formatDateTime, messageCount } from '@/lib/format';
 import { Awatar } from '@/components/Awatar';
+import { MaterialIcon } from '@/components/MaterialIcon';
 import { Wiadomosc } from '@/components/Wiadomosc';
 
 export const dynamic = 'force-dynamic';
@@ -40,7 +41,8 @@ export default async function StronaCzatu({ params, searchParams }: Props) {
     return (
         <main>
             <Link className="back" href={wrocDo}>
-                ← {chat.isStatus ? 'Wszystkie relacje' : 'Wszystkie rozmowy'}
+                <MaterialIcon name="arrowBack" />
+                <span>{chat.isStatus ? 'Wszystkie relacje' : 'Wszystkie rozmowy'}</span>
             </Link>
 
             <header className="chat-head">
@@ -73,13 +75,19 @@ export default async function StronaCzatu({ params, searchParams }: Props) {
 
             <nav className="pager" aria-label="Nawigacja między stronami">
                 {page > 1 ? (
-                    <Link href={`/czat/${slug}?strona=${page - 1}`}>← Nowsze wiadomości</Link>
+                    <Link href={`/czat/${slug}?strona=${page - 1}`}>
+                        <MaterialIcon name="arrowBack" />
+                        <span>Nowsze wiadomości</span>
+                    </Link>
                 ) : (
                     <span>To najnowsze wiadomości</span>
                 )}
 
                 {hasOlder ? (
-                    <Link href={`/czat/${slug}?strona=${page + 1}`}>Starsze wiadomości →</Link>
+                    <Link href={`/czat/${slug}?strona=${page + 1}`}>
+                        <span>Starsze wiadomości</span>
+                        <MaterialIcon name="arrowForward" />
+                    </Link>
                 ) : (
                     <span>To początek archiwum</span>
                 )}

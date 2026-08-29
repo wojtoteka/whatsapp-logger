@@ -131,7 +131,8 @@ export async function checkStore(client: WaClient): Promise<StoreHealth> {
     try {
         return await page.evaluate((keys: string[]): StoreHealth => {
             /* eslint-disable @typescript-eslint/no-explicit-any */
-            const store = (globalThis as any).Store;
+            const root = globalThis as any;
+            const store = root.window?.Store ?? root.Store;
             if (!store) {
                 return { store: false, complete: false, contacts: 0, chats: 0, missing: keys };
             }

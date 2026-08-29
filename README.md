@@ -7,6 +7,7 @@ Projekt jest przeznaczony do tworzenia kopii własnych rozmów. Korzysta z nieof
 ## Najważniejsze możliwości
 
 - zapis zwykłych wiadomości, odpowiedzi, ankiet, lokalizacji i wizytówek;
+- pasywne archiwizowanie bez oznaczania rozmów jako przeczytane;
 - pobieranie zdjęć, filmów, dokumentów, naklejek i nagrań głosowych;
 - archiwizacja relacji oraz historii zdjęć profilowych;
 - nadrabianie ostatnich wiadomości po ponownym uruchomieniu;
@@ -26,6 +27,28 @@ Projekt jest przeznaczony do tworzenia kopii własnych rozmów. Korzysta z nieof
 - MariaDB lub MySQL, jeżeli chcesz korzystać z logowania do panelu.
 
 ## Szybki start loggera
+
+### Debian - instalacja jednym skryptem
+
+Po skopiowaniu repozytorium na serwer uruchom z jego katalogu:
+
+```bash
+bash scripts/instaluj-debian.sh
+```
+
+Skrypt sprawdza Node.js, w razie potrzeby instaluje Chromium przez `apt`, instaluje zależności npm loggera i panelu oraz buduje obie części. Istniejące `.env`, `panel/.env`, `logs/`, sesja WhatsAppa i baza danych pozostają nietknięte.
+
+Jeśli nie chcesz instalować systemowego Chromium, uruchom instalator tak:
+
+```bash
+bash scripts/instaluj-debian.sh --bez-chromium
+```
+
+W tym wariancie Puppeteer musi korzystać z własnej kopii przeglądarki albo z przeglądarki wskazanej przez `CHROME_PATH` w pliku `.env`.
+
+Skrypt nie tworzy bazy ani konta panelu - ten krok jest opisany niżej.
+
+### Instalacja ręczna
 
 1. Zainstaluj zależności:
 
@@ -102,9 +125,10 @@ Po zakończeniu konfiguracji zwykłe `npm start` uruchamia logger i panel razem.
 
 | Polecenie | Działanie |
 |---|---|
-| `npm start` | Buduje projekt, uruchamia logger i — jeśli jest włączony — panel. |
+| `npm start` | Buduje logger oraz panel z obecnych plików, a następnie uruchamia oba procesy. Nie wykonuje `npm install`. |
 | `npm start -- --sprawdz` | Sprawdza konfigurację i kończy pracę bez łączenia z WhatsAppem. |
 | `npm start -- --sprawdz-archiwum` | Kontroluje strukturę JSON, duplikaty i brakujące pliki. |
+| `npm start -- --nadrob-wszystko` | Jednorazowo nadrabia także czaty, które nie mają jeszcze folderu. |
 | `npm start -- --baza` | Sprawdza bazę i tworzy tabele. |
 | `npm start -- --uzytkownik` | Tworzy konto panelu lub zmienia jego hasło. |
 | `npm run logger` | Uruchamia sam logger bez nadzorcy restartów i bez panelu. |
@@ -116,7 +140,15 @@ Po zakończeniu konfiguracji zwykłe `npm start` uruchamia logger i panel razem.
 
 ## Jak działa nadrabianie i deduplikacja
 
-Po połączeniu logger przegląda ostatnie wiadomości dostępne w WhatsApp Web. Domyślnie sprawdza do 250 pozycji w każdym czacie i dopisuje tylko te, których identyfikatorów nie ma jeszcze w archiwum.
+Po połączeniu logger przegląda ostatnie wiadomości dostępne w WhatsApp Web. Przy zwykłym starcie robi to wyłącznie dla czatów, które mają już folder w archiwum. Domyślnie sprawdza do 250 pozycji i dopisuje tylko te, których identyfikatorów jeszcze nie zna.
+
+Aby świadomie przeskanować wszystkie czaty widoczne dla sesji i utworzyć foldery także dla wcześniej niearchiwizowanych rozmów, uruchom:
+
+```powershell
+npm start -- --nadrob-wszystko
+```
+
+To polecenie działa jednorazowo: nie uruchamia panelu, kończy pracę po zapisaniu znalezionych wiadomości i nadal respektuje limit `BACKFILL_MESSAGES_PER_CHAT`.
 
 Najpierw wykorzystywany jest stabilny identyfikator nadany przez WhatsApp. Jeżeli wyjątkowo go brakuje, aplikacja tworzy deterministyczny identyfikator zastępczy z czasu i skrótu danych wiadomości. Dzięki temu ta sama wiadomość odebrana na żywo i znaleziona później podczas nadrabiania nie powinna pojawić się dwa razy.
 
@@ -132,7 +164,7 @@ Wiadomości przychodzące na żywo z zabezpieczonych czatów są archiwizowane r
 [21:37:04] [Nazwa czatu 🔒] ← Kontakt: treść wiadomości
 ```
 
-`LOCKED_CHAT_PASSWORD` służy do próby odsłonięcia czatu w sesji webowej, co może pozwolić także na nadrobienie jego wcześniejszej historii. Jeżeli pojawi się komunikat, że WhatsApp Web nie dostał kodu tajnego, nie oznacza to utraty nowych wiadomości — ograniczenie dotyczy historii ukrytej przed tą sesją.
+`LOCKED_CHAT_PASSWORD` służy do próby odsłonięcia czatu w sesji webowej, co może pozwolić także na nadrobienie jego wcześniejszej historii. Jeżeli pojawi się komunikat, że WhatsApp Web nie dostał kodu tajnego, nie oznacza to utraty nowych wiadomości - ograniczenie dotyczy historii ukrytej przed tą sesją.
 
 Kod tajny i lista zabezpieczonych czatów nie są zapisywane w archiwum.
 
@@ -152,7 +184,7 @@ Pełny wzór z komentarzami znajduje się w `.env.example`. Pusta wartość ozna
 |---|---:|---|
 | `LOGS_DIR` | `./logs` | Folder archiwum. |
 | `MESSAGES_PER_FILE` | `70` | Liczba wiadomości w jednej zamkniętej partii HTML/JSON. |
-| `BACKFILL_MESSAGES_PER_CHAT` | `250` | Liczba ostatnich wiadomości sprawdzanych po starcie; `0` wyłącza. |
+| `BACKFILL_MESSAGES_PER_CHAT` | `250` | Liczba ostatnich wiadomości sprawdzanych w istniejących archiwach; `0` wyłącza. |
 | `STATE_SAVE_INTERVAL_MS` | `5000` | Minimalny odstęp między zapisami `_state.json`; `0` zapisuje po każdej zmianie. |
 | `MEDIA_TYPES` | wszystkie | Typy pobieranych mediów oddzielone przecinkami. |
 | `MAX_MEDIA_SIZE_MB` | `100` | Maksymalny rozmiar pojedynczego pobieranego pliku. |
@@ -178,7 +210,7 @@ Pełny wzór z komentarzami znajduje się w `.env.example`. Pusta wartość ozna
 | `PANEL_PORT` | `3000` | Port panelu. |
 | `DB_ENABLED` | `false` | Włącza dodatkowy zapis wiadomości do bazy SQL. Konta panelu korzystają z bazy niezależnie od tej opcji. |
 | `DB_HOST`, `DB_PORT` | `127.0.0.1`, `3306` | Adres i port bazy. |
-| `DB_USER`, `DB_PASSWORD`, `DB_NAME` | — | Dane dostępowe do bazy. |
+| `DB_USER`, `DB_PASSWORD`, `DB_NAME` | - | Dane dostępowe do bazy. |
 | `LOCKED_CHAT_PASSWORD` | puste | Kod do próby odsłonięcia zabezpieczonych czatów. |
 | `DISCORD_WEBHOOK_URL` | puste | Webhook powiadomień; puste wyłącza integrację. |
 | `DISCORD_PING_USER_ID` | puste | Użytkownik oznaczany przy QR lub utracie autoryzacji. |
@@ -267,15 +299,17 @@ Hook jest dodatkowym zabezpieczeniem, a nie zamiennikiem sprawdzenia zmian przed
 | Sesja straciła autoryzację | Zatrzymaj program, usuń lokalny folder `.wwebjs_auth` i sparuj konto ponownie. |
 | Folder czatu ma nazwę złożoną z cyfr | Poczekaj na synchronizację kontaktów; po znalezieniu lepszej nazwy logger potrafi przenieść archiwum. |
 | Pojawia się komunikat o częściowych danych WhatsApp Web | Zaktualizuj `whatsapp-web.js` i ponownie przetestuj aplikację. |
+| Zbiorcze pobranie czatów kończy się krótkim błędem `r: r` | Logger próbuje rozwinąć czaty pojedynczo, dzięki czemu jeden wadliwy model nie blokuje całego nadrabiania. Liczba pominiętych czatów pojawi się w podsumowaniu. |
 | Zabezpieczony czat nie został odsłonięty | Nowe wiadomości nadal są zapisywane; WhatsApp Web może jedynie nie udostępnić wcześniejszej historii. |
 | Panel nie startuje | Uruchom `npm run panel:build`, a potem ponownie `npm start`. |
 | Panel pokazuje błąd konfiguracji | Sprawdź `AUTH_SECRET` w `panel/.env`. |
-| Nie można zalogować się do panelu | Uruchom `npm start -- --baza`, sprawdź ustawienia DB i utwórz konto przez `--uzytkownik`. |
+| Nie można zalogować się do panelu | `npm start -- --baza` sprawdzi bazę, a `npm start -- --uzytkownik <login>` ustawi hasło ponownie. Konsola panelu rozróżnia brak konta, niepasujące hasło i błąd SQL. |
 | Panel widzi inny lub pusty folder | Sprawdź `LOGS_DIR`; launcher przekazuje panelowi ścieżkę używaną przez logger. |
 | Potrzebne są szczegóły awarii | Zajrzyj do `logs/_bledy.json` albo ustaw `LOG_LEVEL=debug`. |
 
 ## Uwagi
 
+- Logger nie wywołuje `sendSeen` ani `markChatUnread`; pobieranie historii nie oznacza wiadomości jako przeczytanych. Ostateczne zachowanie samego WhatsApp Web może się jednak zmienić po jego aktualizacji.
 - Aplikacja nie odzyska wiadomości, których WhatsApp Web nie udostępnia bieżącej sesji.
 - Usunięcie danych sesji wymusza ponowne sparowanie urządzenia.
 - Włączenie retencji oznacza rzeczywiste usuwanie starszych plików z lokalnego archiwum.
