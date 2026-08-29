@@ -42,8 +42,8 @@ test('długa nazwa jest przycinana do limitu', () => {
 });
 
 test('numer telefonu poznajemy tylko po samych cyfrach właściwej długości', () => {
-    assert.equal(phoneDigits('48123456789@c.us'), '48123456789');
-    assert.equal(phoneDigits({ _serialized: '48123456789@c.us' }), '48123456789');
+    assert.equal(phoneDigits('5550100@c.us'), '5550100');
+    assert.equal(phoneDigits({ _serialized: '5550100@c.us' }), '5550100');
     assert.equal(phoneDigits('12345@c.us'), null, 'za krótkie, żeby być numerem');
     assert.equal(phoneDigits('abc@c.us'), null);
     assert.equal(phoneDigits(null), null);

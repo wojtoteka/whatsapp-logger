@@ -7,7 +7,7 @@ function message(overrides: Partial<ArchivedMessage> = {}): ArchivedMessage {
     return {
         id: 'msg-1',
         timestamp: 1_700_000_000,
-        from: 'Ala',
+        from: 'Kontakt',
         fromMe: false,
         avatar: null,
         body: 'cześć',
@@ -26,36 +26,36 @@ function message(overrides: Partial<ArchivedMessage> = {}): ArchivedMessage {
 }
 
 test('ścieżka mediów zwykłego czatu liczy się od folderu archiwum', () => {
-    assert.equal(toArchivePath('Ala', 'media/foto.png'), 'Ala/media/foto.png');
+    assert.equal(toArchivePath('Kontakt', 'media/foto.png'), 'Kontakt/media/foto.png');
 });
 
 test('ukośniki Windowsa zamieniają się na te, które rozumie przeglądarka', () => {
     // path.relative na Windowsie zwraca "media\\foto.png".
-    assert.equal(toArchivePath('Ala', 'media\\foto.png'), 'Ala/media/foto.png');
+    assert.equal(toArchivePath('Kontakt', 'media\\foto.png'), 'Kontakt/media/foto.png');
 });
 
 test('zdjęcie profilowe zwykłego czatu trafia do wspólnego _avatars', () => {
     // Na dysku zapisujemy je względem folderu czatu, bo tak działa HTML.
-    assert.equal(toArchivePath('Ala', '../_avatars/48111@c.us/2026-08-20.jpg'), '_avatars/48111@c.us/2026-08-20.jpg');
+    assert.equal(toArchivePath('Kontakt', '../_avatars/48111@c.us/2026-08-20.jpg'), '_avatars/48111@c.us/2026-08-20.jpg');
 });
 
 test('relacje leżą o poziom głębiej, a ścieżka i tak wychodzi poprawnie', () => {
     // Statusy/<autor> to dwa poziomy, więc odnośnik ma dwa razy "..".
     assert.equal(
-        toArchivePath('Statusy/Dawid', '../../_avatars/48697@c.us/2026-08-29.jpg'),
+        toArchivePath('Statusy/Kontakt', '../../_avatars/48697@c.us/2026-08-29.jpg'),
         '_avatars/48697@c.us/2026-08-29.jpg',
     );
-    assert.equal(toArchivePath('Statusy/Dawid', 'media/storka.png'), 'Statusy/Dawid/media/storka.png');
+    assert.equal(toArchivePath('Statusy/Kontakt', 'media/storka.png'), 'Statusy/Kontakt/media/storka.png');
 });
 
 test('ścieżka wychodząca poza archiwum nie ma prawa trafić do bazy', () => {
     // Inaczej panel serwowałby pliki spoza folderu z logami.
-    assert.equal(toArchivePath('Ala', '../../../etc/passwd'), null);
-    assert.equal(toArchivePath('Ala', '../../sekret.txt'), null);
+    assert.equal(toArchivePath('Kontakt', '../../../etc/passwd'), null);
+    assert.equal(toArchivePath('Kontakt', '../../sekret.txt'), null);
 });
 
 test('brak ścieżki zostaje brakiem, a nie pustym napisem', () => {
-    assert.equal(toArchivePath('Ala', null), null);
+    assert.equal(toArchivePath('Kontakt', null), null);
 });
 
 test('wiadomość zamienia się w wiersz z rozwiązanymi ścieżkami', () => {
@@ -67,12 +67,12 @@ test('wiadomość zamienia się w wiersz z rozwiązanymi ścieżkami', () => {
             type: 'image',
             body: 'popatrz',
         }),
-        '48111222333@c.us',
-        'Ala',
+        '5550100@c.us',
+        'Kontakt',
     );
 
-    assert.equal(row.chatId, '48111222333@c.us');
-    assert.equal(row.mediaPath, 'Ala/media/foto.png');
+    assert.equal(row.chatId, '5550100@c.us');
+    assert.equal(row.mediaPath, 'Kontakt/media/foto.png');
     assert.equal(row.avatarPath, '_avatars/ala/2026-08-20.jpg');
     assert.equal(row.body, 'popatrz');
     assert.equal(row.ts, 1_700_000_000);
@@ -82,17 +82,17 @@ test('wiadomość zamienia się w wiersz z rozwiązanymi ścieżkami', () => {
 test('pola złożone jadą do bazy jako JSON, a puste jako brak', () => {
     const row = toMessageRow(
         message({
-            location: { latitude: 52.1, longitude: 21.2, name: 'Dom', address: null },
+            location: { latitude: 52.1, longitude: 21.2, name: 'Punkt', address: null },
             poll: { question: 'Kiedy?', options: ['dziś'], multiple: false },
         }),
         'czat',
-        'Ala',
+        'Kontakt',
     );
 
     assert.deepEqual(JSON.parse(row.location ?? 'null'), {
         latitude: 52.1,
         longitude: 21.2,
-        name: 'Dom',
+        name: 'Punkt',
         address: null,
     });
     assert.equal(JSON.parse(row.poll ?? 'null').question, 'Kiedy?');
@@ -102,7 +102,7 @@ test('pola złożone jadą do bazy jako JSON, a puste jako brak', () => {
 });
 
 test('zbyt długa nazwa nadawcy jest przycinana do rozmiaru kolumny', () => {
-    const row = toMessageRow(message({ from: 'x'.repeat(400) }), 'czat', 'Ala');
+    const row = toMessageRow(message({ from: 'x'.repeat(400) }), 'czat', 'Kontakt');
 
     assert.equal(row.sender.length, 255);
 });

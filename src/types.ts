@@ -103,7 +103,7 @@ export interface ChatStateFile {
     batchNum: number;
     totalMessages: number;
     pendingMessages: ArchivedMessage[];
-    /** Identyfikatory już zapisanych relacji - żeby nie dublować. */
+    /** Ostatnie identyfikatory wiadomości - żeby nie dublować ich po restarcie. */
     seenIds?: string[];
     lastUpdated: string;
 }

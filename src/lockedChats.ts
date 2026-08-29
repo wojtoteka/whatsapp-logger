@@ -54,6 +54,11 @@ export interface UnlockResult {
      * czatów, albo masz, tylko kod tajny nie doszedł do tej sesji.
      */
     lockedCount?: number | null;
+    /**
+     * Identyfikatory zablokowanych czatów. Zostają wyłącznie w pamięci i
+     * służą do oznaczenia ich wiadomości kłódką w konsoli.
+     */
+    lockedChatIds?: string[];
 }
 
 export interface UnlockOptions {
@@ -125,15 +130,66 @@ async function runInPage(secret: string, moduleName: string): Promise<UnlockResu
     }
     if (!utils) return { status: 'unavailable' };
 
+    // Lista jest dostępna nawet wtedy, gdy kod tajny nie zsynchronizował się
+    // z telefonem. Oprócz rozróżnienia komunikatu startowego wykorzystujemy
+    // ją do oznaczenia wiadomości z właściwych czatów w konsoli.
+    let lockedCount: number | null = null;
+    let lockedChatIds: string[] | null = null;
+    try {
+        if (typeof utils.getLockedChats === 'function') {
+            const chats: unknown = await utils.getLockedChats();
+            if (Array.isArray(chats)) {
+                lockedCount = chats.length;
+                lockedChatIds = [];
+
+                for (const chat of chats as any[]) {
+                    const raw = chat?.id ?? chat?.wid ?? chat;
+                    const candidates: unknown[] = [
+                        typeof raw === 'string' ? raw : null,
+                        raw?._serialized,
+                        chat?._serialized,
+                    ];
+
+                    try {
+                        if (typeof raw?.serialize === 'function') candidates.push(raw.serialize());
+                    } catch {
+                        /* wystarczą pozostałe reprezentacje */
+                    }
+                    try {
+                        if (typeof raw?.toString === 'function') candidates.push(raw.toString());
+                    } catch {
+                        /* wystarczą pozostałe reprezentacje */
+                    }
+
+                    const id = candidates.find(
+                        (value) => typeof value === 'string' && value.length > 0,
+                    );
+                    if (typeof id === 'string' && !lockedChatIds.includes(id)) {
+                        lockedChatIds.push(id);
+                    }
+                }
+            }
+        }
+    } catch {
+        /* lista służy tylko do oznaczenia logu */
+    }
+
+    const lockedMeta = (): Pick<UnlockResult, 'lockedCount' | 'lockedChatIds'> => ({
+        ...(lockedCount !== null ? { lockedCount } : {}),
+        ...(lockedChatIds !== null ? { lockedChatIds } : {}),
+    });
+
     try {
         if (
             typeof utils.lockedChatsAreAccessible === 'function' &&
             (await utils.lockedChatsAreAccessible())
         ) {
-            return { status: 'granted' };
+            return { status: 'granted', ...lockedMeta() };
         }
 
-        if (typeof utils.validateSecretCode !== 'function') return { status: 'unsupported' };
+        if (typeof utils.validateSecretCode !== 'function') {
+            return { status: 'unsupported', ...lockedMeta() };
+        }
 
         // Kod podajemy zawsze, bez wcześniejszego wypytywania WhatsAppa,
         // czy w ogóle jest ustawiony. hasChatlockSecretCode() potrafi
@@ -153,21 +209,9 @@ async function runInPage(secret: string, moduleName: string): Promise<UnlockResu
                 /* nie wiadomo - zostaje samo "hasło nie pasuje" */
             }
 
-            // Ile czatów jest zablokowanych - po tym poznajemy, czy problem
-            // leży w haśle, czy w tym, że kod w ogóle nie doszedł do sesji.
-            let lockedCount: number | null = null;
-            try {
-                if (typeof utils.getLockedChats === 'function') {
-                    const chats: unknown = await utils.getLockedChats();
-                    lockedCount = Array.isArray(chats) ? chats.length : null;
-                }
-            } catch {
-                /* nieistotne dla samego wyniku */
-            }
-
             return {
                 status: codeSet === false ? 'not_enabled' : 'invalid_password',
-                lockedCount,
+                ...lockedMeta(),
             };
         }
 
@@ -189,19 +233,27 @@ async function runInPage(secret: string, moduleName: string): Promise<UnlockResu
             await win.Store.Cmd.trigger('chatlock:unlock');
             triggered = true;
         }
-        if (!triggered) return { status: 'unsupported' };
+        if (!triggered) return { status: 'unsupported', ...lockedMeta() };
 
-        if (typeof utils.lockedChatsAreAccessible !== 'function') return { status: 'granted' };
+        if (typeof utils.lockedChatsAreAccessible !== 'function') {
+            return { status: 'granted', ...lockedMeta() };
+        }
 
         // Zwykle stan zmienia się od razu, ale dajemy interfejsowi
         // maksymalnie pół sekundy na obsłużenie polecenia.
         for (let poll = 0; poll < 20; poll++) {
-            if (await utils.lockedChatsAreAccessible()) return { status: 'granted' };
+            if (await utils.lockedChatsAreAccessible()) {
+                return { status: 'granted', ...lockedMeta() };
+            }
             await new Promise((resolve) => setTimeout(resolve, 25));
         }
-        return { status: 'not_granted' };
+        return { status: 'not_granted', ...lockedMeta() };
     } catch (err: any) {
-        return { status: 'error', detail: String(err?.message ?? err ?? 'bez treści') };
+        return {
+            status: 'error',
+            detail: String(err?.message ?? err ?? 'bez treści'),
+            ...lockedMeta(),
+        };
     }
     /* eslint-enable @typescript-eslint/no-explicit-any */
 }

@@ -77,7 +77,7 @@ export interface ChatStateFile {
 
 /** Czat na liście - tyle, ile trzeba, żeby narysować kafelek. */
 export interface ChatSummary {
-    /** Folder względem logs/, np. "Ala" albo "Statusy/Dawid". */
+    /** Folder względem logs/, np. "Kontakt" albo "Statusy/Kontakt". */
     folder: string;
     /** Ten sam folder w postaci nadającej się do adresu URL. */
     slug: string;

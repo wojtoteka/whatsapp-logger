@@ -19,6 +19,7 @@ export function testConfig(logsDir: string, overrides: Partial<Config> = {}): Co
 
         logsDir,
         messagesPerFile: 3,
+        backfillMessagesPerChat: 250,
         mediaTypes: new Set(MEDIA_TYPES_ALL),
         maxMediaSizeMb: 100,
 
@@ -134,7 +135,7 @@ export interface FakeMessageOptions {
 
 /** Udawana wiadomość w kształcie, jaki podaje whatsapp-web.js. */
 export function fakeMessage(options: FakeMessageOptions = {}): WaMessage {
-    const from = options.from ?? '111222333444555@lid';
+    const from = options.from ?? '5550198@lid';
 
     const rawId = options.id ?? 'msg-1';
     const id = options.rawStatusId

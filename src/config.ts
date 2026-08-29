@@ -24,6 +24,8 @@ export interface Config {
     /** Folder archiwum, zawsze ścieżka bezwzględna. */
     logsDir: string;
     messagesPerFile: number;
+    /** Ile ostatnich wiadomości z każdego czatu przejrzeć po uruchomieniu. */
+    backfillMessagesPerChat: number;
     mediaTypes: ReadonlySet<string>;
     maxMediaSizeMb: number;
 
@@ -179,6 +181,7 @@ const KNOWN_KEYS = new Set([
     'DISCORD_PING_USER_ID',
     'LOGS_DIR',
     'MESSAGES_PER_FILE',
+    'BACKFILL_MESSAGES_PER_CHAT',
     'MEDIA_TYPES',
     'MAX_MEDIA_SIZE_MB',
     'SAVE_PROFILE_PICS',
@@ -245,6 +248,10 @@ export function loadConfig(rootDir: string, env: Env = process.env): LoadResult 
 
         logsDir: path.resolve(rootDir, logsDirRaw),
         messagesPerFile: readNumber(env, 'MESSAGES_PER_FILE', 70, warnings, { min: 1, max: 10000 }),
+        backfillMessagesPerChat: readNumber(env, 'BACKFILL_MESSAGES_PER_CHAT', 250, warnings, {
+            min: 0,
+            max: 10000,
+        }),
         mediaTypes: readMediaTypes(env, warnings),
         maxMediaSizeMb: readNumber(env, 'MAX_MEDIA_SIZE_MB', 100, warnings, { min: 0, max: 2048 }),
 

@@ -17,26 +17,26 @@ import { fakeClient, fakeMessage } from './helpers';
 test('zapisany kontakt daje nazwę z książki adresowej i najwyższy poziom pewności', async () => {
     const resolver = new IdentityResolver(
         fakeClient({
-            lidToPhone: { '999@lid': '48111222333@c.us' },
+            lidToPhone: { '999@lid': '5550100@c.us' },
             contacts: {
-                '48111222333@c.us': { id: { _serialized: '48111222333@c.us' }, number: '48111222333', name: 'Ala z pracy', isMyContact: true },
+                '5550100@c.us': { id: { _serialized: '5550100@c.us' }, number: '5550100', name: 'Kontakt z pracy', isMyContact: true },
             },
         }),
     );
 
     const identity = await resolver.resolve(fakeMessage({ from: '999@lid' }), '999@lid');
 
-    assert.equal(identity?.name, 'Ala z pracy');
+    assert.equal(identity?.name, 'Kontakt z pracy');
     assert.equal(identity?.tier, NameTier.SAVED);
-    assert.equal(identity?.id, '48111222333@c.us', 'archiwum prowadzimy pod numerem, nie pod @lid');
+    assert.equal(identity?.id, '5550100@c.us', 'archiwum prowadzimy pod numerem, nie pod @lid');
 });
 
 test('niezapisany kontakt dostaje swoją nazwę profilu, a nie numer', async () => {
     const resolver = new IdentityResolver(
         fakeClient({
-            lidToPhone: { '999@lid': '48111222333@c.us' },
+            lidToPhone: { '999@lid': '5550100@c.us' },
             contacts: {
-                '48111222333@c.us': { id: { _serialized: '48111222333@c.us' }, number: '48111222333', pushname: 'Nazwa profilu' },
+                '5550100@c.us': { id: { _serialized: '5550100@c.us' }, number: '5550100', pushname: 'Nazwa profilu' },
             },
         }),
     );
@@ -49,25 +49,25 @@ test('niezapisany kontakt dostaje swoją nazwę profilu, a nie numer', async () 
 
 test('bez nazwy zostaje numer telefonu, a folder i tak nie nazywa się cyframi @lid', async () => {
     const resolver = new IdentityResolver(
-        fakeClient({ lidToPhone: { '999@lid': '48111222333@c.us' }, contacts: {} }),
+        fakeClient({ lidToPhone: { '999@lid': '5550100@c.us' }, contacts: {} }),
     );
 
     const identity = await resolver.resolve(fakeMessage({ from: '999@lid' }), '999@lid');
 
-    assert.equal(identity?.name, '48111222333');
+    assert.equal(identity?.name, '5550100');
     assert.equal(identity?.tier, NameTier.NUMBER);
-    assert.equal(identity?.id, '48111222333@c.us');
+    assert.equal(identity?.id, '5550100@c.us');
 });
 
 test('gdy WhatsApp nie zna numeru, nazwa profilu z wiadomości ratuje folder przed cyframi', async () => {
     const resolver = new IdentityResolver(fakeClient({ lidToPhone: {}, contacts: {} }));
 
     const identity = await resolver.resolve(
-        fakeMessage({ from: '999@lid', notifyName: 'Krzysiek' }),
+        fakeMessage({ from: '999@lid', notifyName: 'Profil testowy' }),
         '999@lid',
     );
 
-    assert.equal(identity?.name, 'Krzysiek');
+    assert.equal(identity?.name, 'Profil testowy');
     assert.equal(identity?.tier, NameTier.NICK);
     assert.equal(identity?.id, '999@lid', 'numeru nie ma, więc zostaje identyfikator z wiadomości');
 });
@@ -85,30 +85,30 @@ test('grupa bierze nazwę wprost z getChat i nie zmienia identyfikatora', async 
     const resolver = new IdentityResolver(fakeClient());
 
     const identity = await resolver.resolve(
-        fakeMessage({ from: '120363000@g.us', chatName: 'Ekipa wyjazdowa' }),
-        '120363000@g.us',
+        fakeMessage({ from: '777000@g.us', chatName: 'Grupa testowa' }),
+        '777000@g.us',
     );
 
-    assert.equal(identity?.name, 'Ekipa wyjazdowa');
+    assert.equal(identity?.name, 'Grupa testowa');
     assert.equal(identity?.tier, NameTier.SAVED);
-    assert.equal(identity?.id, '120363000@g.us');
+    assert.equal(identity?.id, '777000@g.us');
 });
 
 test('grupa bez odpowiedzi z getChat nie wywraca rozpoznawania', async () => {
     const resolver = new IdentityResolver(fakeClient());
 
     const identity = await resolver.resolve(
-        fakeMessage({ from: '120363000@g.us', chatName: null }),
-        '120363000@g.us',
+        fakeMessage({ from: '777000@g.us', chatName: null }),
+        '777000@g.us',
     );
 
-    assert.equal(identity?.id, '120363000@g.us');
+    assert.equal(identity?.id, '777000@g.us');
     assert.equal(identity?.tier, NameTier.ID);
 });
 
 test('numer @lid pytamy tylko raz - wynik zostaje w pamięci', async () => {
     let calls = 0;
-    const client = fakeClient({ lidToPhone: { '999@lid': '48111222333@c.us' } });
+    const client = fakeClient({ lidToPhone: { '999@lid': '5550100@c.us' } });
     const original = client.getContactLidAndPhone.bind(client);
     client.getContactLidAndPhone = async (ids: string[]) => {
         calls++;
@@ -125,36 +125,36 @@ test('numer @lid pytamy tylko raz - wynik zostaje w pamięci', async () => {
 test('cyfry z @lid nigdy nie zostają podane jako numer telefonu', () => {
     // WhatsApp wkłada w takie pola sam identyfikator, gdy numeru nie zna.
     const contact = {
-        id: { _serialized: '252402947067958@lid' },
-        number: '252402947067958',
-        pushname: 'Ktoś',
+        id: { _serialized: '5550199@lid' },
+        number: '5550199',
+        pushname: 'Profil',
     } as unknown as WaContact;
 
-    const info = readContact(contact, '252402947067958@lid');
+    const info = readContact(contact, '5550199@lid');
 
     assert.equal(info.number, null);
-    assert.equal(info.nick, 'Ktoś');
+    assert.equal(info.nick, 'Profil');
 });
 
 test('skrócona nazwa liczy się jako zapisany kontakt tylko dla kogoś z książki', () => {
     const saved = readContact(
-        { shortName: 'Ola', isMyContact: true } as unknown as WaContact,
-        '48111222333@c.us',
+        { shortName: 'Kontakt', isMyContact: true } as unknown as WaContact,
+        '5550100@c.us',
     );
-    assert.equal(saved.saved, 'Ola');
+    assert.equal(saved.saved, 'Kontakt');
 
     const stranger = readContact(
-        { shortName: '+48 111', isMyContact: false, pushname: 'Ola' } as unknown as WaContact,
-        '48111222333@c.us',
+        { shortName: '+555 010', isMyContact: false, pushname: 'Kontakt' } as unknown as WaContact,
+        '5550100@c.us',
     );
     assert.equal(stranger.saved, null);
-    assert.equal(stranger.nick, 'Ola');
+    assert.equal(stranger.nick, 'Kontakt');
 });
 
 test('nazwa profilu nie jest brana z własnych wiadomości ani z grup', () => {
-    assert.equal(pushNameOf(fakeMessage({ notifyName: 'Ala' }), '999@lid'), 'Ala');
-    assert.equal(pushNameOf(fakeMessage({ notifyName: 'Ala', fromMe: true }), '999@lid'), null);
-    assert.equal(pushNameOf(fakeMessage({ notifyName: 'Ala' }), '120363@g.us'), null);
+    assert.equal(pushNameOf(fakeMessage({ notifyName: 'Kontakt' }), '999@lid'), 'Kontakt');
+    assert.equal(pushNameOf(fakeMessage({ notifyName: 'Kontakt', fromMe: true }), '999@lid'), null);
+    assert.equal(pushNameOf(fakeMessage({ notifyName: 'Kontakt' }), '120363@g.us'), null);
 });
 
 test('identyfikator czatu bierzemy z właściwej strony wiadomości', () => {
@@ -164,18 +164,18 @@ test('identyfikator czatu bierzemy z właściwej strony wiadomości', () => {
 });
 
 test('nazwa zastępcza to same cyfry z identyfikatora', () => {
-    assert.equal(placeholderName('252402947067958@lid'), '252402947067958');
-    assert.equal(placeholderName('48111222333@c.us'), '48111222333');
+    assert.equal(placeholderName('5550199@lid'), '5550199');
+    assert.equal(placeholderName('5550100@c.us'), '5550100');
 });
 
 test('nazwa nadawcy do wyświetlenia idzie od najlepszej do najgorszej', () => {
     assert.equal(
-        contactDisplayName({ name: 'Ala', pushname: 'ala123', number: '48111' } as unknown as WaContact),
-        'Ala',
+        contactDisplayName({ name: 'Kontakt', pushname: 'profil123', number: '48111' } as unknown as WaContact),
+        'Kontakt',
     );
     assert.equal(
-        contactDisplayName({ pushname: 'ala123', number: '48111' } as unknown as WaContact),
-        'ala123',
+        contactDisplayName({ pushname: 'profil123', number: '48111' } as unknown as WaContact),
+        'profil123',
     );
     assert.equal(contactDisplayName({ number: '48111' } as unknown as WaContact), '48111');
     assert.equal(contactDisplayName(null), null);

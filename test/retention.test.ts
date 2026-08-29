@@ -30,64 +30,64 @@ async function exists(file: string): Promise<boolean> {
 
 test('stare pliki znikają, świeże zostają', async () => {
     await withTempDir(async (dir) => {
-        await fileAged(path.join(dir, 'Ala', 'messages_0001.html'), 200);
-        await fileAged(path.join(dir, 'Ala', 'messages_0002.html'), 10);
-        await fileAged(path.join(dir, 'Ala', 'media', 'stare.jpg'), 200);
-        await fileAged(path.join(dir, 'Ala', 'media', 'nowe.jpg'), 3);
+        await fileAged(path.join(dir, 'Kontakt', 'messages_0001.html'), 200);
+        await fileAged(path.join(dir, 'Kontakt', 'messages_0002.html'), 10);
+        await fileAged(path.join(dir, 'Kontakt', 'media', 'stare.jpg'), 200);
+        await fileAged(path.join(dir, 'Kontakt', 'media', 'nowe.jpg'), 3);
 
         const stats = await runRetention(dir, 180);
 
         assert.equal(stats.files, 2);
-        assert.equal(await exists(path.join(dir, 'Ala', 'messages_0001.html')), false);
-        assert.equal(await exists(path.join(dir, 'Ala', 'messages_0002.html')), true);
-        assert.equal(await exists(path.join(dir, 'Ala', 'media', 'stare.jpg')), false);
-        assert.equal(await exists(path.join(dir, 'Ala', 'media', 'nowe.jpg')), true);
+        assert.equal(await exists(path.join(dir, 'Kontakt', 'messages_0001.html')), false);
+        assert.equal(await exists(path.join(dir, 'Kontakt', 'messages_0002.html')), true);
+        assert.equal(await exists(path.join(dir, 'Kontakt', 'media', 'stare.jpg')), false);
+        assert.equal(await exists(path.join(dir, 'Kontakt', 'media', 'nowe.jpg')), true);
     });
 });
 
 test('zdjęcia profilowe i pliki stanu przeżywają kasowanie', async () => {
     await withTempDir(async (dir) => {
         await fileAged(path.join(dir, '_avatars', 'ktos', '2020-01-01.jpg'), 900);
-        await fileAged(path.join(dir, 'Ala', '_state.json'), 900);
-        await fileAged(path.join(dir, 'Ala', 'messages_0001.html'), 900);
+        await fileAged(path.join(dir, 'Kontakt', '_state.json'), 900);
+        await fileAged(path.join(dir, 'Kontakt', 'messages_0001.html'), 900);
 
         await runRetention(dir, 180);
 
         assert.equal(await exists(path.join(dir, '_avatars', 'ktos', '2020-01-01.jpg')), true);
-        assert.equal(await exists(path.join(dir, 'Ala', '_state.json')), true);
-        assert.equal(await exists(path.join(dir, 'Ala', 'messages_0001.html')), false);
+        assert.equal(await exists(path.join(dir, 'Kontakt', '_state.json')), true);
+        assert.equal(await exists(path.join(dir, 'Kontakt', 'messages_0001.html')), false);
     });
 });
 
 test('relacje leżą o poziom głębiej i też podlegają kasowaniu', async () => {
     await withTempDir(async (dir) => {
-        await fileAged(path.join(dir, 'Statusy', 'Ala', 'messages_0001.html'), 200);
-        await fileAged(path.join(dir, 'Statusy', 'Ala', 'media', 'storka.jpg'), 200);
-        await fileAged(path.join(dir, 'Statusy', 'Ala', '_state.json'), 200);
+        await fileAged(path.join(dir, 'Statusy', 'Kontakt', 'messages_0001.html'), 200);
+        await fileAged(path.join(dir, 'Statusy', 'Kontakt', 'media', 'storka.jpg'), 200);
+        await fileAged(path.join(dir, 'Statusy', 'Kontakt', '_state.json'), 200);
 
         const stats = await runRetention(dir, 180);
 
         assert.equal(stats.files, 2);
-        assert.equal(await exists(path.join(dir, 'Statusy', 'Ala', 'messages_0001.html')), false);
-        assert.equal(await exists(path.join(dir, 'Statusy', 'Ala', 'media', 'storka.jpg')), false);
-        assert.equal(await exists(path.join(dir, 'Statusy', 'Ala', '_state.json')), true);
+        assert.equal(await exists(path.join(dir, 'Statusy', 'Kontakt', 'messages_0001.html')), false);
+        assert.equal(await exists(path.join(dir, 'Statusy', 'Kontakt', 'media', 'storka.jpg')), false);
+        assert.equal(await exists(path.join(dir, 'Statusy', 'Kontakt', '_state.json')), true);
     });
 });
 
 test('kasowanie wyłączone zerem nie rusza niczego', async () => {
     await withTempDir(async (dir) => {
-        await fileAged(path.join(dir, 'Ala', 'messages_0001.html'), 9000);
+        await fileAged(path.join(dir, 'Kontakt', 'messages_0001.html'), 9000);
 
         const stats = await runRetention(dir, 0);
 
         assert.equal(stats.files, 0);
-        assert.equal(await exists(path.join(dir, 'Ala', 'messages_0001.html')), true);
+        assert.equal(await exists(path.join(dir, 'Kontakt', 'messages_0001.html')), true);
     });
 });
 
 test('po skasowaniu czegokolwiek powstaje wpis w dzienniku z podsumowaniem', async () => {
     await withTempDir(async (dir) => {
-        await fileAged(path.join(dir, 'Ala', 'messages_0001.html'), 400, 'x'.repeat(1024));
+        await fileAged(path.join(dir, 'Kontakt', 'messages_0001.html'), 400, 'x'.repeat(1024));
 
         await runRetention(dir, 180);
 

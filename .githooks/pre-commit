@@ -21,17 +21,25 @@ komunikat() {
 }
 
 # 1. Sam plik .env nie ma prawa trafic do repozytorium
-if git diff --cached --name-only --diff-filter=ACM | grep -qx ".env"; then
-    komunikat "plik .env jest w poczekalni" \
-        "Ten plik trzyma hasla i webhook. Wyjmij go: git rm --cached .env"
-    blad=1
-fi
+for plik in $(git diff --cached --name-only --diff-filter=ACM); do
+    if [ "$plik" = ".env" ]; then
+        komunikat "plik .env jest w poczekalni" \
+            "Ten plik trzyma hasla i webhook. Wyjmij go: git rm --cached .env"
+        blad=1
+    fi
+done
 
 # 2. Szablon .env.example ma miec puste wartosci
-if git diff --cached --name-only --diff-filter=ACM | grep -qx ".env.example"; then
+szablon=0
+for plik in $(git diff --cached --name-only --diff-filter=ACM); do
+    [ "$plik" = ".env.example" ] && szablon=1
+done
+
+if [ "$szablon" -eq 1 ]; then
     KLUCZE="LOCKED_CHAT_PASSWORD|DISCORD_WEBHOOK_URL|DISCORD_PING_USER_ID"
-    trafienia=$(git show ":.env.example" 2>/dev/null \
-        | grep -nE "^[[:space:]]*($KLUCZE)[[:space:]]*=[[:space:]]*[^[:space:]]")
+    trafienia=$(git grep --cached -n -E \
+        "^[[:space:]]*($KLUCZE)[[:space:]]*=[[:space:]]*[^[:space:]]" \
+        -- .env.example 2>/dev/null || true)
 
     if [ -n "$trafienia" ]; then
         komunikat "w .env.example jest wypelniona wartosc wrazliwa" \
@@ -49,11 +57,12 @@ fi
 # w testach ("/123/abc") przechodza, a wyciek prawdziwego adresu nie.
 WZOR="discord(app)?[.]com/api/webhooks/[0-9]{17,}/[A-Za-z0-9_-]{30,}"
 
-webhooki=$(git diff --cached --name-only --diff-filter=ACM \
-    | while read -r plik; do
-        git show ":$plik" 2>/dev/null \
-            | grep -Eq "$WZOR" && echo "$plik"
-      done)
+pliki=$(git diff --cached --name-only --diff-filter=ACM)
+if [ -n "$pliki" ]; then
+    webhooki=$(git grep --cached -l -E "$WZOR" -- $pliki 2>/dev/null || true)
+else
+    webhooki=""
+fi
 
 if [ -n "$webhooki" ]; then
     komunikat "adres webhooka Discorda w plikach: $webhooki" \

@@ -32,12 +32,13 @@ npm start -- --uzytkownik    # zakłada konto (hasło pytane, niewidoczne)
 
 Panel otwiera się pod **http://localhost:3000** i czyta ten sam folder `logs`, do którego pisze logger - ścieżka jest przekazywana wprost, więc nie da się ich rozjechać.
 
-Domyślnie nasłuchuje tylko na tej maszynie. Żeby wejść do niego z innego komputera w sieci, ustaw `PANEL_HOST` w `.env` - `0.0.0.0` (wszystkie karty sieciowe) albo konkretny adres serwera, np. `192.168.1.29`. Na maszynie z publicznym IP `0.0.0.0` wystawia archiwum na świat i jedyną ochroną zostaje hasło do logowania.
+Domyślnie nasłuchuje tylko na tej maszynie. Żeby wejść do niego z innego komputera w sieci, ustaw `PANEL_HOST` w `.env` - `0.0.0.0` (wszystkie karty sieciowe) albo konkretny adres serwera. Na maszynie z publicznym IP `0.0.0.0` wystawia archiwum na świat i jedyną ochroną zostaje hasło do logowania.
 
 Przydatne polecenia:
 
 ```bash
 npm start -- --sprawdz     # pokaż wczytane ustawienia i zakończ, bez łączenia
+npm start -- --sprawdz-archiwum # sprawdź JSON-y, duplikaty i brakujące pliki
 npm start -- --baza        # sprawdź połączenie z MariaDB i załóż tabele
 npm start -- --uzytkownik  # załóż konto do panelu albo zmień mu hasło
 npm run logger           # sam logger, bez panelu
@@ -59,6 +60,7 @@ Wszystko siedzi w **jednym pliku `.env`** w katalogu programu. Wzór z komentarz
 | `DISCORD_PING_USER_ID` | *(puste)* | Kogo pingować przy utracie autoryzacji i przy kodzie QR. |
 | `LOGS_DIR` | `./logs` | Folder archiwum. |
 | `MESSAGES_PER_FILE` | `70` | Ile wiadomości mieści jeden plik HTML. |
+| `BACKFILL_MESSAGES_PER_CHAT` | `250` | Ile ostatnich wiadomości z każdego dostępnego czatu sprawdzić po starcie. `0` wyłącza nadrabianie. |
 | `MEDIA_TYPES` | wszystkie | `image,video,audio,ptt,document,sticker`. `brak` wyłącza pobieranie. |
 | `MAX_MEDIA_SIZE_MB` | `100` | Plik ponad limit zostawia w archiwum notatkę zamiast pliku. |
 | `SAVE_PROFILE_PICS` | `true` | Pobieranie zdjęć profilowych z historią zmian. |
@@ -69,7 +71,7 @@ Wszystko siedzi w **jednym pliku `.env`** w katalogu programu. Wzór z komentarz
 | `RETENTION_DAYS` | `180` | Po ilu dniach znikają pliki HTML i media. |
 | `RETENTION_CHECK_HOURS` | `12` | Co ile godzin sprawdzać, czy jest co skasować. |
 | `PANEL_ENABLED` | `true` | Czy `npm start` ma uruchamiać też panel. |
-| `PANEL_HOST` | `127.0.0.1` | Na czym panel nasłuchuje: `127.0.0.1` tylko ta maszyna, `0.0.0.0` wszystkie karty sieciowe, albo konkretne IP, np. `192.168.1.29`. Sam adres, bez `http://` i bez portu. |
+| `PANEL_HOST` | `127.0.0.1` | Na czym panel nasłuchuje: `127.0.0.1` tylko ta maszyna, `0.0.0.0` wszystkie karty sieciowe albo konkretny adres serwera. Sam adres, bez `http://` i bez portu. |
 | `PANEL_PORT` | `3000` | Port panelu. |
 | `DB_ENABLED` | `false` | Zapis wiadomości do MariaDB (opcjonalny, panel go nie wymaga). |
 | `DB_HOST` `DB_PORT` | `127.0.0.1` `3306` | Gdzie stoi baza. |
@@ -84,13 +86,15 @@ Błędna wartość nie wywraca programu: zostaje przycięta albo zastąpiona dom
 ## Co robi
 
 - **Archiwum w HTML** - wiadomości trafiają do gotowych do czytania plików, dzielonych po `MESSAGES_PER_FILE` na plik, w podfolderze per czat. Kolejne części łączą się odnośnikami tam i z powrotem.
+- **Nadrabianie po starcie** - logger prosi WhatsApp Web o świeżą historię każdego dostępnego czatu i przegląda ostatnie `BACKFILL_MESSAGES_PER_CHAT` wiadomości. Stabilne identyfikatory zapisane w `_state.json` sprawiają, że zdarzenie na żywo i późniejszy przegląd nie tworzą kopii.
 - **Nazwa folderu: zapisany kontakt, nazwa profilu albo numer** - folder nazywa się tak, jak masz rozmówcę zapisanego w telefonie. Dla niezapisanego kontaktu używana jest jego nazwa profilu, potem numer telefonu, a cyfry z identyfikatora dopiero w ostateczności. Lepsza nazwa odnaleziona później przenosi razem folder, pliki HTML i media.
 - **Pobieranie mediów** - zdjęcia, filmy, nagrania głosowe, dokumenty i naklejki lądują na dysku. Plik pominięty zostawia notatkę z typem, nazwą i rozmiarem, więc widać, że coś tam było.
 - **Skasowane wiadomości zostają** - treść zachowuje się razem z notką „skasowana w WhatsAppie", także wtedy, gdy wiadomość trafiła już do zapisanego pliku HTML.
 - **Zdjęcia profilowe z historią** - w `logs/_avatars/<kontakt>/<data>.jpg`. Gdy ktoś zmieni zdjęcie, dochodzi nowa wersja, a stara zostaje - dzięki temu stare wiadomości pokazują zdjęcie z tamtego czasu. Zdjęcia nie podlegają kasowaniu po czasie.
 - **Relacje (statusy)** - w `logs/Statusy/<autor>`, osobno od rozmów. Na żywo zapisywane od razu, a przy starcie i co `SWEEP_CHECK_HOURS` program dobiera te, które WhatsApp ma jeszcze u siebie. Po identyfikatorze wiadomości poznaje, czego nie dopisywać drugi raz.
 - **Lokalizacje, wizytówki, ankiety** - lokalizacja dostaje odnośnik do mapy, wizytówka rozkłada się na imię i numer, ankieta pokazuje pytanie z odpowiedziami.
-- **Zabezpieczone czaty** - **archiwizują się zawsze, niezależnie od `LOCKED_CHAT_PASSWORD`.** Wiadomości zbieramy ze zdarzeń `message` i `message_create`, a te lecą również z czatów zablokowanych: blokada chroni interfejs, nie filtruje strumienia wiadomości. Logger nigdzie nie woła `getChats()`, więc nie ma czego odblokowywać, żeby czat trafił do logów. Kod z `.env` służy wyłącznie do odsłonięcia takich czatów w interfejsie tej sesji przeglądarki - przy `HEADLESS=true` nikt na niego nie patrzy, więc niepowodzenie nie jest awarią i konsola go tak nie zgłasza. Hasło ani lista czatów nie są nigdzie zapisywane.
+- **Zabezpieczone czaty** - wiadomości na żywo archiwizują się niezależnie od `LOCKED_CHAT_PASSWORD`, bo zdarzenia `message` i `message_create` docierają także z czatów zablokowanych. Kod służy do odsłonięcia ich w interfejsie tej sesji oraz do próby nadrobienia historii; jeśli WhatsApp Web nie dostał kodu z telefonu, bieżące wiadomości nadal są zapisywane, ale ukryty czat może nie znaleźć się w przeglądzie wcześniejszej historii. Hasło ani lista czatów nie są zapisywane na dysku.
+- **Automatyczne odzyskiwanie** - przy rozłączeniu albo awarii logger zapisuje stan i launcher uruchamia go ponownie po 5, 10, 20 sekundach, maksymalnie osiem razy w ciągu 15 minut. Utrata autoryzacji nie wpada w pętlę restartów, bo wymaga ponownego sparowania.
 - **Kasowanie po czasie** - stare pliki HTML i media znikają same, razem z wiadomościami, które utknęły w niedokończonej partii. Zdjęcia profilowe i pliki stanu zostają.
 - **Powiadomienia na Discordzie** - o utracie autoryzacji, rozłączeniu i konieczności zeskanowania QR, z osobnym odstępem 5 minut dla każdej kategorii, żeby nie zasypać kanału. Odstęp jest zapisany na dysku, więc przeżywa restart.
 
@@ -130,11 +134,13 @@ src/config.ts         wczytanie i sprawdzenie .env
 src/waClient.ts       przeglądarka, klient, czekanie na dane WhatsAppa
 src/identity.ts       kto to jest: @lid → numer → nazwa, poziomy pewności
 src/archive.ts        stan czatów, partie HTML, kolejka zapisu, zmiany nazw
+src/archiveCheck.ts   kontrola spójności archiwum bez łączenia z WhatsAppem
 src/html.ts           generowanie plików HTML
 src/media.ts          pobieranie plików z wiadomości i z relacji
 src/avatars.ts        zdjęcia profilowe z historią
 src/statuses.ts       rozpoznawanie relacji
 src/retention.ts      kasowanie plików starszych niż RETENTION_DAYS
+src/restart.ts        kody wyjścia i ograniczona polityka restartów
 src/lockedChats.ts    dostęp do czatów zabezpieczonych kodem
 src/notify.ts         webhook Discorda z odstępem per kategoria
 src/log.ts            konsola i plik z błędami
@@ -159,16 +165,16 @@ Kod jest w TypeScripcie, kompiluje się przez `tsc` do `dist/`. Zależności w c
 
 ```
 logs/
-  Ala/
+  Kontakt/
     messages_0001.html      kolejne części zapisu rozmowy
+    messages_0001.json      ta sama partia w postaci danych - z niej czyta panel
     media/                  pobrane zdjęcia, filmy, nagrania
     _state.json             partia, która jeszcze się nie zamknęła
   Statusy/
-    Ala/                    relacje tej osoby, tak samo poukładane
+    Kontakt/                relacje tej osoby, tak samo poukładane
   _avatars/
-    48111222333@c.us/2026-08-29.jpg
+    kontakt-id/2026-08-29.jpg
     _historia.json          która wersja zdjęcia od kiedy obowiązuje
-    messages_0001.json      ta sama partia w postaci danych - z niej czyta panel
   _czaty.json               gdzie leży archiwum którego czatu
   _bledy.json               ostatnie błędy, do diagnozy
   _kasowanie.log            co i kiedy skasowała retencja
@@ -209,3 +215,4 @@ Treść wiadomości jest escapowana przed wstawieniem do HTML, a nazwy czatów p
 | „Configuration" zamiast strony logowania | Brak `AUTH_SECRET` w `panel/.env` - wygeneruj: `cd panel && npx auth secret`. |
 | Panel pokazuje puste archiwum | Sprawdź ścieżkę w komunikacie na stronie - musi wskazywać na ten sam folder co `LOGS_DIR`. |
 | Panel nie pokazuje starszych rozmów | Wiadomości sprzed wersji 2.1 nie mają plików `messages_XXXX.json`. Zostają w HTML-u, panel ich nie zobaczy. |
+| Chcę sprawdzić archiwum bez uruchamiania WhatsAppa | `npm start -- --sprawdz-archiwum` sprawdzi strukturę JSON, duplikaty, pary HTML/JSON i odnośniki do mediów. |

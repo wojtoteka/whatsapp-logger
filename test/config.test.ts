@@ -23,6 +23,7 @@ test('bez pliku .env program dostaje komplet wartości domyślnych', async () =>
         assert.equal(envFileFound, false);
         assert.deepEqual(warnings, []);
         assert.equal(config.messagesPerFile, 70);
+        assert.equal(config.backfillMessagesPerChat, 250);
         assert.equal(config.retentionDays, 180);
         assert.equal(config.saveProfilePics, true);
         assert.equal(config.logsDir, path.resolve(dir, './logs'));
@@ -34,6 +35,7 @@ test('wartości z .env nadpisują domyślne, a ścieżka archiwum jest bezwzglę
     await withEnvFile(
         [
             'MESSAGES_PER_FILE=25',
+            'BACKFILL_MESSAGES_PER_CHAT=400',
             'RETENTION_ENABLED=false',
             'SAVE_PROFILE_PICS=nie',
             'LOGS_DIR=./archiwum',
@@ -42,6 +44,7 @@ test('wartości z .env nadpisują domyślne, a ścieżka archiwum jest bezwzglę
         async (dir) => {
             const { config, warnings } = loadConfig(dir, {
                 MESSAGES_PER_FILE: '25',
+                BACKFILL_MESSAGES_PER_CHAT: '400',
                 RETENTION_ENABLED: 'false',
                 SAVE_PROFILE_PICS: 'nie',
                 LOGS_DIR: './archiwum',
@@ -50,6 +53,7 @@ test('wartości z .env nadpisują domyślne, a ścieżka archiwum jest bezwzglę
 
             assert.deepEqual(warnings, []);
             assert.equal(config.messagesPerFile, 25);
+            assert.equal(config.backfillMessagesPerChat, 400);
             assert.equal(config.retentionEnabled, false);
             assert.equal(config.saveProfilePics, false);
             assert.equal(config.logsDir, path.resolve(dir, './archiwum'));
@@ -135,7 +139,7 @@ test('domyślnie panel nasłuchuje tylko na tej maszynie', async () => {
 });
 
 test('PANEL_HOST przyjmuje pętlę zwrotną, wszystkie karty i konkretne IP', async () => {
-    for (const adres of ['127.0.0.1', '0.0.0.0', '192.168.1.29', 'archiwum.lan']) {
+    for (const adres of ['127.0.0.1', '0.0.0.0', 'host-w-sieci.lan', 'archiwum.lan']) {
         await withEnvFile(`PANEL_HOST=${adres}
 `, async (dir) => {
             const { config, warnings } = loadConfig(dir, { PANEL_HOST: adres });
@@ -147,7 +151,7 @@ test('PANEL_HOST przyjmuje pętlę zwrotną, wszystkie karty i konkretne IP', as
 });
 
 test('PANEL_HOST z http:// albo z portem to ostrzeżenie, nie cicha awaria', async () => {
-    for (const zly of ['http://192.168.1.29', '192.168.1.29:3000', '0.0.0.0/24']) {
+    for (const zly of ['http://host-w-sieci.lan', 'host-w-sieci.lan:3000', '0.0.0.0/24']) {
         await withEnvFile(`PANEL_HOST=${zly}
 `, async (dir) => {
             const { warnings } = loadConfig(dir, { PANEL_HOST: zly });

@@ -14,7 +14,9 @@ import type { ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
+import { isOneShot, normalizeCliArgs } from '../src/cli';
 import { loadConfig } from '../src/config';
+import { decideLoggerRestart } from '../src/restart';
 
 const ROOT_DIR = path.resolve(__dirname, '..', '..');
 const PANEL_DIR = path.join(ROOT_DIR, 'panel');
@@ -31,13 +33,25 @@ const NEXT_BIN = path.join(PANEL_DIR, 'node_modules', 'next', 'dist', 'bin', 'ne
 /** Ile najdłużej czekamy, aż logger dopisze oczekujące wiadomości. */
 const SHUTDOWN_TIMEOUT_MS = 20_000;
 
+// npm 11 na Windowsie zamienia argumenty "--nazwa" w npm_config_nazwa
+// zamiast przekazać je procesowi. Składamy z powrotem znane flagi, zachowując
+// też zwykłe argumenty, np. login po --uzytkownik.
+const loggerArgs = normalizeCliArgs(process.argv.slice(2), process.env);
+const oneShot = isOneShot(loggerArgs);
+
 const children: Array<{ name: string; child: ChildProcess }> = [];
 let stopping = false;
+let restartAttempts: number[] = [];
+let restartTimer: NodeJS.Timeout | null = null;
 
 function main(): void {
     const { config } = loadConfig(ROOT_DIR);
 
     startLogger();
+
+    // Polecenia administracyjne mają wykonać jedną rzecz i zakończyć się bez
+    // uruchamiania panelu ani automatycznego restartu.
+    if (oneShot) return;
 
     if (!config.panelEnabled) {
         console.log('[panel] wyłączony (PANEL_ENABLED=false)');
@@ -78,7 +92,7 @@ function ostrzezOBrakuKlucza(): void {
 
 /** Logger dostaje konsolę na wyłączność - inaczej kod QR by się rozjechał. */
 function startLogger(): void {
-    const child = spawn(process.execPath, [path.join(ROOT_DIR, 'dist', 'index.js')], {
+    const child = spawn(process.execPath, [path.join(ROOT_DIR, 'dist', 'index.js'), ...loggerArgs], {
         cwd: ROOT_DIR,
         stdio: 'inherit',
     });
@@ -156,19 +170,62 @@ function prefix(child: ChildProcess, label: string): void {
 
 function track(name: string, child: ChildProcess): void {
     children.push({ name, child });
+    let handled = false;
 
     child.on('error', (err) => {
         console.error(`[${name}] nie udało się uruchomić: ${err.message}`);
+        if (handled) return;
+        handled = true;
+        if (name === 'logger') handleLoggerExit(1);
+        else stopAll(1);
     });
 
     child.on('exit', (code, signal) => {
-        if (stopping) return;
+        if (stopping || handled) return;
+        handled = true;
         console.log(`[${name}] zakończony (${signal ?? `kod ${String(code)}`}).`);
+
+        if (name === 'logger') {
+            handleLoggerExit(code);
+            return;
+        }
 
         // Jeden bez drugiego nie ma sensu: panel bez loggera pokazuje
         // zamrożone archiwum, logger bez panelu to nie jest to, co ustawiono.
         stopAll(code ?? 1);
     });
+}
+
+/** Ponawia wyłącznie logger; panel może przez chwilę pokazywać ostatni stan. */
+function handleLoggerExit(code: number | null): void {
+    if (oneShot) {
+        stopAll(code ?? 1);
+        return;
+    }
+
+    const now = Date.now();
+    const decision = decideLoggerRestart(code, restartAttempts, now);
+    restartAttempts = decision.recentAttempts;
+
+    if (!decision.restart) {
+        if (decision.reason === 'auth_failure') {
+            console.error('[logger] utrata autoryzacji wymaga ponownego sparowania - nie restartuję.');
+        } else if (decision.reason === 'limit') {
+            console.error('[logger] zbyt wiele awarii w 15 minut - zatrzymuję automatyczne restarty.');
+        }
+        stopAll(code ?? 1);
+        return;
+    }
+
+    restartAttempts.push(now);
+    console.log(
+        `[logger] ponawiam za ${String(decision.delayMs / 1000)} s ` +
+            `(próba ${String(decision.attempt)}/8).`,
+    );
+    restartTimer = setTimeout(() => {
+        restartTimer = null;
+        if (!stopping) startLogger();
+    }, decision.delayMs);
 }
 
 /**
@@ -182,6 +239,10 @@ function track(name: string, child: ChildProcess): void {
 function stopAll(code: number): void {
     if (stopping) return;
     stopping = true;
+    if (restartTimer) {
+        clearTimeout(restartTimer);
+        restartTimer = null;
+    }
 
     for (const { name, child } of children) {
         if (child.exitCode !== null || child.killed) continue;
@@ -198,7 +259,7 @@ function stopAll(code: number): void {
 
 /** Sprawdza co chwilę, czy logger już skończył zapisywać. */
 function waitForLogger(code: number, deadline: number): void {
-    const logger = children.find((c) => c.name === 'logger');
+    const logger = children.findLast((c) => c.name === 'logger');
 
     if (!logger || logger.child.exitCode !== null || Date.now() > deadline) {
         if (logger && logger.child.exitCode === null) {

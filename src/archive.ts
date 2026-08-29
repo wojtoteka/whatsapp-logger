@@ -5,6 +5,7 @@
 // zdążyło jeszcze wypełnić partii. Jeden czat obsługiwany jest po kolei
 // (kolejka promisów), więc dwie wiadomości nigdy nie wchodzą sobie w drogę.
 
+import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { Config } from './config';
@@ -36,7 +37,6 @@ import {
     isStatusChat,
     isStatusMessage,
     STATUS_DIR,
-    STATUS_SEEN_LIMIT,
     statusAuthorId,
     statusChatId,
 } from './statuses';
@@ -77,6 +77,9 @@ const IGNORED_TYPES = new Set([
     'protocol',
 ]);
 
+/** Tyle ostatnich identyfikatorów wystarczy do bezpiecznego nadrabiania historii. */
+const SEEN_ID_LIMIT = 10_000;
+
 interface ChatState {
     id: string;
     name: string;
@@ -90,6 +93,7 @@ interface ChatState {
     totalMessages: number;
     pending: ArchivedMessage[];
     seenIds: string[];
+    seenIdSet: Set<string>;
     saveTimer: NodeJS.Timeout | null;
     lastSaveAt: number;
     /** Identyfikator prosto z wiadomości, zwykle @lid. */
@@ -104,9 +108,19 @@ export interface StatusSweepStats {
     skipped: number;
 }
 
+export interface BackfillStats {
+    chats: number;
+    scanned: number;
+    saved: number;
+    skipped: number;
+    failedChats: number;
+}
+
 export class Archive {
     private readonly states = new Map<string, ChatState>();
     private readonly queues = new Map<string, Promise<unknown>>();
+    /** Identyfikatory czatów zabezpieczonych kodem, tylko do oznaczeń w konsoli. */
+    private readonly lockedChatIds = new Set<string>();
     /** Identyfikator z wiadomości → klucz, pod którym prowadzimy archiwum. */
     private readonly aliases = new Map<string, string>();
     private readonly index = new Map<string, ChatIndexEntry>();
@@ -132,6 +146,15 @@ export class Archive {
     /** Folder archiwum - potrzebny modułowi kasującemu stare pliki. */
     get logsDir(): string {
         return this.config.logsDir;
+    }
+
+    /** Aktualizuje listę zwróconą przez WhatsApp Web; niczego nie zapisuje na dysk. */
+    setLockedChatIds(ids: readonly string[]): void {
+        this.lockedChatIds.clear();
+        for (const id of ids) {
+            const clean = id.trim();
+            if (clean) this.lockedChatIds.add(clean);
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -211,10 +234,11 @@ export class Archive {
         const state = this.states.get(chatId);
         if (!state) return false;
 
-        const msgId = messageKey(message);
+        const msgId = archiveMessageId(message, state.id);
 
-        // Tę samą relację przegląd może podać drugi raz - nie dokładamy jej.
-        if (state.isStatus && msgId && state.seenIds.includes(msgId)) return false;
+        // Zdarzenie na żywo i przegląd historii mogą podać tę samą wiadomość.
+        // Stabilny identyfikator sprawia, że do archiwum trafi tylko raz.
+        if (state.seenIdSet.has(msgId)) return false;
 
         // Czat prowadzony pod samymi cyframi dostaje prawdziwą nazwę, gdy
         // tylko ją poznamy - razem z folderem na dysku.
@@ -243,7 +267,7 @@ export class Archive {
         });
 
         const entry: ArchivedMessage = {
-            id: msgId ?? `${state.id}-${message.timestamp}`,
+            id: msgId,
             timestamp: message.timestamp,
             from: senderName,
             fromMe: message.fromMe,
@@ -263,6 +287,7 @@ export class Archive {
             poll: pollInfo(message),
         };
 
+        this.rememberMessageId(state, msgId);
         state.pending.push(entry);
         state.totalMessages++;
 
@@ -278,13 +303,6 @@ export class Archive {
             await this.db?.setChatAvatar(state.id, row.avatarPath);
         }
 
-        if (state.isStatus && msgId) {
-            state.seenIds.push(msgId);
-            if (state.seenIds.length > STATUS_SEEN_LIMIT) {
-                state.seenIds = state.seenIds.slice(-STATUS_SEEN_LIMIT);
-            }
-        }
-
         if (state.pending.length >= this.config.messagesPerFile) {
             await this.flushBatch(state);
         } else if (state.isStatus) {
@@ -295,7 +313,82 @@ export class Archive {
             await this.scheduleStateSave(state);
         }
 
+        const isLocked = this.lockedChatIds.has(rawId) || this.lockedChatIds.has(chatId);
+        log.info(formatMessageLine(state.name, entry, isLocked));
+
         return true;
+    }
+
+    /** Dopisuje ID do trwałego, ograniczonego zbioru używanego przy nadrabianiu. */
+    private rememberMessageId(state: ChatState, msgId: string): void {
+        state.seenIds.push(msgId);
+        state.seenIdSet.add(msgId);
+
+        while (state.seenIds.length > SEEN_ID_LIMIT) {
+            const removed = state.seenIds.shift();
+            if (removed) state.seenIdSet.delete(removed);
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    //  Nadrabianie po uruchomieniu
+    // ─────────────────────────────────────────────────────────────────────
+
+    /**
+     * Przegląda ostatnie wiadomości każdego czatu widocznego dla WhatsApp
+     * Weba. save() prowadzi je tą samą ścieżką co zdarzenia na żywo, więc
+     * media, baza, nazwy i deduplikacja zachowują się identycznie.
+     */
+    async backfillRecent(limit = this.config.backfillMessagesPerChat): Promise<BackfillStats> {
+        const stats: BackfillStats = {
+            chats: 0,
+            scanned: 0,
+            saved: 0,
+            skipped: 0,
+            failedChats: 0,
+        };
+        const wanted = Math.max(0, Math.floor(limit));
+        if (wanted === 0 || typeof this.client.getChats !== 'function') return stats;
+
+        let chats;
+        try {
+            chats = await this.client.getChats();
+        } catch (err) {
+            log.error('Nie udało się pobrać czatów do nadrobienia', err, {
+                stage: 'nadrabianie: getChats',
+            });
+            return stats;
+        }
+        stats.chats = chats.length;
+
+        for (const chat of chats) {
+            const chatId = chat.id?._serialized ?? null;
+            try {
+                // Prosimy urządzenie główne o świeżą historię, ale brak tej
+                // możliwości nie blokuje odczytu tego, co już ma Web.
+                if (typeof chat.syncHistory === 'function') {
+                    try {
+                        await chat.syncHistory();
+                    } catch (err) {
+                        log.quiet(err, { stage: 'nadrabianie: syncHistory', chat: chatId });
+                    }
+                }
+
+                const messages = (await chat.fetchMessages({ limit: wanted })) as WaMessage[];
+                messages.sort((a, b) => a.timestamp - b.timestamp);
+
+                for (const message of messages) {
+                    stats.scanned++;
+                    if (await this.save(message)) stats.saved++;
+                    else stats.skipped++;
+                }
+            } catch (err) {
+                stats.failedChats++;
+                log.quiet(err, { stage: 'nadrabianie czatu', chat: chatId });
+            }
+        }
+
+        return stats;
     }
 
     private async quotedInfo(message: WaMessage): Promise<QuotedInfo | null> {
@@ -466,6 +559,7 @@ export class Archive {
         await ensureDir(chatDir);
 
         const saved = await readJson<ChatStateFile>(path.join(chatDir, '_state.json'));
+        const seenIds = await this.loadRecentSeenIds(chatDir, saved);
 
         const state: ChatState = {
             id: chatId,
@@ -478,7 +572,8 @@ export class Archive {
             batchNum: saved?.batchNum ?? 1,
             totalMessages: saved?.totalMessages ?? 0,
             pending: Array.isArray(saved?.pendingMessages) ? saved.pendingMessages : [],
-            seenIds: Array.isArray(saved?.seenIds) ? saved.seenIds : [],
+            seenIds,
+            seenIdSet: new Set(seenIds),
             saveTimer: null,
             lastSaveAt: 0,
             rawId,
@@ -497,6 +592,48 @@ export class Archive {
         if (chatTier > useTier && chatName !== useName) {
             await this.renameChat(state, chatName, chatTier);
         }
+    }
+
+    /**
+     * Starsze stany przechowywały ID tylko dla relacji. Uzupełniamy pamięć
+     * identyfikatorami z bieżącej partii oraz ostatnich zamkniętych partii,
+     * żeby pierwsze nadrabianie po aktualizacji nie zrobiło kopii.
+     */
+    private async loadRecentSeenIds(
+        chatDir: string,
+        saved: ChatStateFile | null,
+    ): Promise<string[]> {
+        const ids: string[] = [];
+        const known = new Set<string>();
+        const add = (id: unknown): void => {
+            if (typeof id !== 'string' || id.length === 0 || known.has(id)) return;
+            known.add(id);
+            ids.push(id);
+        };
+
+        const batchFiles = (await listDir(chatDir))
+            .filter((file) => /^messages_\d+\.json$/.test(file))
+            .sort()
+            .reverse();
+
+        const recentBatchIds: string[] = [];
+        const recentBatchSet = new Set<string>();
+        for (const file of batchFiles) {
+            const batch = await readJson<BatchFile>(path.join(chatDir, file));
+            for (const message of [...(batch?.messages ?? [])].reverse()) {
+                const id = message?.id;
+                if (typeof id !== 'string' || !id || recentBatchSet.has(id)) continue;
+                recentBatchSet.add(id);
+                recentBatchIds.push(id);
+                if (recentBatchIds.length >= SEEN_ID_LIMIT) break;
+            }
+            if (recentBatchIds.length >= SEEN_ID_LIMIT) break;
+        }
+        for (const id of recentBatchIds.reverse()) add(id);
+        for (const id of saved?.seenIds ?? []) add(id);
+        for (const message of saved?.pendingMessages ?? []) add(message?.id);
+
+        return ids.slice(-SEEN_ID_LIMIT);
     }
 
     /**
@@ -971,6 +1108,59 @@ export class Archive {
         this.identity.refreshAfterSync();
         for (const state of this.states.values()) state.nameRetryAt = 0;
     }
+}
+
+/** Taki sam krótki podgląd wiadomości, jaki pokazywała wersja sprzed przepisania. */
+export function formatMessageLine(
+    chatName: string,
+    message: Pick<ArchivedMessage, 'timestamp' | 'body' | 'type' | 'from' | 'fromMe'>,
+    isLocked = false,
+): string {
+    const preview = (message.body.replace(/\s+/g, ' ').trim() || `[${message.type}]`).slice(0, 60);
+    const label = isLocked ? `${chatName} 🔒` : chatName;
+    const time = new Date(message.timestamp * 1000);
+    const clock = [time.getHours(), time.getMinutes(), time.getSeconds()]
+        .map((part) => String(part).padStart(2, '0'))
+        .join(':');
+    return `[${clock}] [${label}] ${message.fromMe ? '→' : '←'} ${message.from}: ${preview}`;
+}
+
+/**
+ * WhatsApp prawie zawsze daje własne, stabilne ID. Awaryjny identyfikator
+ * przypomina datę z sześcioma cyframi, ale cyfry wynikają z treści zamiast
+ * być losowe - ta sama wiadomość musi dostać to samo ID po restarcie.
+ */
+export function archiveMessageId(message: WaMessage, chatId: string): string {
+    const native = messageKey(message);
+    if (native) return native;
+
+    const timestamp = Number.isFinite(message.timestamp) ? message.timestamp : 0;
+    const date = new Date(timestamp * 1000);
+    const stamp = [
+        date.getUTCFullYear(),
+        date.getUTCMonth() + 1,
+        date.getUTCDate(),
+        date.getUTCHours(),
+        date.getUTCMinutes(),
+        date.getUTCSeconds(),
+        date.getUTCMilliseconds(),
+    ]
+        .map((part, index) => String(part).padStart(index === 0 ? 4 : index === 6 ? 3 : 2, '0'))
+        .join('');
+    const fingerprint = JSON.stringify([
+        chatId,
+        timestamp,
+        message.from ?? null,
+        message.to ?? null,
+        message.author ?? null,
+        message.fromMe,
+        message.type,
+        message.body,
+        message._data?.filename ?? null,
+    ]);
+    const digest = createHash('sha256').update(fingerprint).digest('hex').slice(0, 12);
+    const digits = (BigInt(`0x${digest}`) % 1_000_000n).toString().padStart(6, '0');
+    return `local-${stamp}-${digits}`;
 }
 
 // ── Wiadomości bez treści tekstowej ─────────────────────────────────────

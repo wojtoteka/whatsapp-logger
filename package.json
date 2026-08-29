@@ -9,7 +9,8 @@
   },
   "scripts": {
     "build": "tsc",
-    "start": "npm run build && node dist/scripts/uruchom.js",
+    "prestart": "npm run build",
+    "start": "node dist/scripts/uruchom.js",
     "logger": "npm run build && node dist/index.js",
     "panel": "cd panel && npm run dev",
     "panel:build": "cd panel && npm install && npm run build",

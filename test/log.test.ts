@@ -80,7 +80,7 @@ test('błędy trafiają do pliku diagnostycznego razem z kontekstem', async () =
         captureOutput(() => {
             log.error('Nie udało się pobrać', new Error('sieć padła'), {
                 stage: 'media',
-                chat: 'Ala',
+                chat: 'Kontakt',
             });
         });
 
@@ -90,7 +90,7 @@ test('błędy trafiają do pliku diagnostycznego razem z kontekstem', async () =
 
         assert.equal(entries.length, 1);
         assert.equal(entries[0]?.etap, 'media');
-        assert.equal(entries[0]?.czat, 'Ala');
+        assert.equal(entries[0]?.czat, 'Kontakt');
         assert.equal(entries[0]?.blad, 'sieć padła');
     });
 });

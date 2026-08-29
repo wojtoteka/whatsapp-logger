@@ -14,7 +14,7 @@ function message(overrides: Partial<ArchivedMessage> = {}): ArchivedMessage {
     return {
         id: 'msg-1',
         timestamp: 1_700_000_000,
-        from: 'Ala',
+        from: 'Kontakt',
         fromMe: false,
         avatar: null,
         body: 'cześć',
@@ -34,7 +34,7 @@ function message(overrides: Partial<ArchivedMessage> = {}): ArchivedMessage {
 
 function render(messages: ArchivedMessage[], isLatest = true, batchNum = 1): string {
     return generateHtml({
-        chatName: 'Ala',
+        chatName: 'Kontakt',
         batchNum,
         messages,
         isLatest,
@@ -139,22 +139,22 @@ test('plik z mediami pokazuje zdjęcie, a pominięty plik zostawia notatkę', ()
 
 test('lokalizacja, wizytówka i ankieta rozkładają się na czytelne części', () => {
     const html = render([
-        message({ type: 'location', location: { latitude: 52.1, longitude: 21.2, name: 'Dom', address: null } }),
-        message({ id: 'm2', type: 'vcard', contacts: [{ name: 'Ola', numbers: ['+48 111 222 333'], org: null }] }),
+        message({ type: 'location', location: { latitude: 52.1, longitude: 21.2, name: 'Punkt', address: null } }),
+        message({ id: 'm2', type: 'vcard', contacts: [{ name: 'Kontakt', numbers: ['+555 010 0'], org: null }] }),
         message({ id: 'm3', type: 'poll_creation', poll: { question: 'Kiedy?', options: ['dziś', 'jutro'], multiple: true } }),
     ]);
 
     assert.ok(html.includes('openstreetmap.org'));
-    assert.ok(html.includes('Dom'));
-    assert.ok(html.includes('Ola'));
-    assert.ok(html.includes('tel:+48111222333'));
+    assert.ok(html.includes('Punkt'));
+    assert.ok(html.includes('Kontakt'));
+    assert.ok(html.includes('tel:+5550100'));
     assert.ok(html.includes('Kiedy?'));
     assert.ok(html.includes('Można wybrać kilka odpowiedzi.'));
 });
 
 test('ten sam nadawca zawsze dostaje ten sam kolor imienia', () => {
-    assert.equal(senderTone('Ala'), senderTone('Ala'));
-    assert.match(senderTone('Ala'), /^n[1-6]$/);
+    assert.equal(senderTone('Kontakt'), senderTone('Kontakt'));
+    assert.match(senderTone('Kontakt'), /^n[1-6]$/);
     assert.match(senderTone(''), /^n[1-6]$/);
 });
 

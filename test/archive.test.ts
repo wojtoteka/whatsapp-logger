@@ -2,12 +2,42 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { Archive } from '../src/archive';
+import { Archive, archiveMessageId, formatMessageLine } from '../src/archive';
 import { log } from '../src/log';
 import type { ChatStateFile } from '../src/types';
 import { fakeClient, fakeMessage, testConfig, withTempDir } from './helpers';
 
 log.setLevel('error');
+
+test('podgląd wiadomości oznacza zabezpieczony czat kłódką', () => {
+    const timestamp = Math.floor(new Date(2026, 0, 2, 3, 4, 5).getTime() / 1000);
+    const message = {
+        timestamp,
+        body: 'tajna wiadomość',
+        type: 'chat',
+        from: 'Ja',
+        fromMe: true,
+    };
+
+    assert.equal(formatMessageLine('Kontakt', message), '[03:04:05] [Kontakt] → Ja: tajna wiadomość');
+    assert.equal(
+        formatMessageLine('Kontakt', message, true),
+        '[03:04:05] [Kontakt 🔒] → Ja: tajna wiadomość',
+    );
+});
+
+test('awaryjne ID bez identyfikatora WhatsAppa jest stabilne, a nie losowe', () => {
+    const first = fakeMessage({ body: 'bez id', timestamp: 1_700_000_000 });
+    delete (first as unknown as { id?: unknown }).id;
+    const copy = { ...first } as typeof first;
+
+    const one = archiveMessageId(first, '111@c.us');
+    const two = archiveMessageId(copy, '111@c.us');
+
+    assert.equal(one, two);
+    assert.match(one, /^local-\d{17}-\d{6}$/);
+    assert.notEqual(archiveMessageId({ ...copy, body: 'inna' } as typeof first, '111@c.us'), one);
+});
 
 async function readState(dir: string, folder: string): Promise<ChatStateFile> {
     const raw = await fs.readFile(path.join(dir, folder, '_state.json'), 'utf8');
@@ -25,24 +55,24 @@ async function listFiles(dir: string): Promise<string[]> {
 test('wiadomość ląduje w folderze nazwanym zapisanym kontaktem, nie cyframi @lid', async () => {
     await withTempDir(async (dir) => {
         const client = fakeClient({
-            lidToPhone: { '999@lid': '48111222333@c.us' },
+            lidToPhone: { '999@lid': '5550100@c.us' },
             contacts: {
-                '48111222333@c.us': { id: { _serialized: '48111222333@c.us' }, number: '48111222333', name: 'Ala', isMyContact: true },
+                '5550100@c.us': { id: { _serialized: '5550100@c.us' }, number: '5550100', name: 'Kontakt', isMyContact: true },
             },
         });
         const archive = new Archive(testConfig(dir), client);
 
         const saved = await archive.save(
-            fakeMessage({ from: '999@lid', body: 'pierwsza', contact: { name: 'Ala' } }),
+            fakeMessage({ from: '999@lid', body: 'pierwsza', contact: { name: 'Kontakt' } }),
         );
 
         assert.equal(saved, true);
-        assert.ok((await listFiles(dir)).includes('Ala'));
+        assert.ok((await listFiles(dir)).includes('Kontakt'));
 
-        const state = await readState(dir, 'Ala');
+        const state = await readState(dir, 'Kontakt');
         assert.equal(state.pendingMessages.length, 1);
         assert.equal(state.pendingMessages[0]?.body, 'pierwsza');
-        assert.equal(state.chatName, 'Ala');
+        assert.equal(state.chatName, 'Kontakt');
     });
 });
 
@@ -50,14 +80,14 @@ test('po wypełnieniu partii powstaje plik HTML, a stan zaczyna się od nowa', a
     await withTempDir(async (dir) => {
         const archive = new Archive(
             testConfig(dir, { messagesPerFile: 3 }),
-            fakeClient({ lidToPhone: { '999@lid': '48111222333@c.us' } }),
+            fakeClient({ lidToPhone: { '999@lid': '5550100@c.us' } }),
         );
 
         for (let i = 1; i <= 3; i++) {
             await archive.save(fakeMessage({ id: `m${i}`, from: '999@lid', body: `wiadomość ${i}` }));
         }
 
-        const folder = path.join(dir, '48111222333');
+        const folder = path.join(dir, '5550100');
         const files = await listFiles(folder);
         assert.ok(files.includes('messages_0001.html'), `pliki: ${files.join(', ')}`);
 
@@ -65,7 +95,7 @@ test('po wypełnieniu partii powstaje plik HTML, a stan zaczyna się od nowa', a
         assert.ok(html.includes('wiadomość 1'));
         assert.ok(html.includes('wiadomość 3'));
 
-        const state = await readState(dir, '48111222333');
+        const state = await readState(dir, '5550100');
         assert.equal(state.pendingMessages.length, 0);
         assert.equal(state.batchNum, 2);
         assert.equal(state.totalMessages, 3);
@@ -76,14 +106,14 @@ test('druga partia odblokowuje odnośnik "dalej" w pierwszej', async () => {
     await withTempDir(async (dir) => {
         const archive = new Archive(
             testConfig(dir, { messagesPerFile: 2 }),
-            fakeClient({ lidToPhone: { '999@lid': '48111222333@c.us' } }),
+            fakeClient({ lidToPhone: { '999@lid': '5550100@c.us' } }),
         );
 
         for (let i = 1; i <= 4; i++) {
             await archive.save(fakeMessage({ id: `m${i}`, from: '999@lid', body: `w${i}` }));
         }
 
-        const folder = path.join(dir, '48111222333');
+        const folder = path.join(dir, '5550100');
         const first = await fs.readFile(path.join(folder, 'messages_0001.html'), 'utf8');
 
         assert.ok(!first.includes('Dalszych części jeszcze nie ma'));
@@ -95,40 +125,40 @@ test('lepsza nazwa przenosi folder razem z zapisanymi już plikami', async () =>
     await withTempDir(async (dir) => {
         // Najpierw WhatsApp nie wie nic - czat zakłada się pod numerem.
         const contacts: Record<string, { id: { _serialized: string }; number: string; name?: string }> = {
-            '48111222333@c.us': { id: { _serialized: '48111222333@c.us' }, number: '48111222333' },
+            '5550100@c.us': { id: { _serialized: '5550100@c.us' }, number: '5550100' },
         };
-        const client = fakeClient({ lidToPhone: { '999@lid': '48111222333@c.us' }, contacts });
+        const client = fakeClient({ lidToPhone: { '999@lid': '5550100@c.us' }, contacts });
         const archive = new Archive(testConfig(dir, { messagesPerFile: 1 }), client);
 
         await archive.save(fakeMessage({ id: 'm1', from: '999@lid', body: 'przed' }));
-        assert.ok((await listFiles(dir)).includes('48111222333'));
+        assert.ok((await listFiles(dir)).includes('5550100'));
 
         // Teraz kontakt trafia do książki adresowej.
-        contacts['48111222333@c.us'] = {
-            id: { _serialized: '48111222333@c.us' },
-            number: '48111222333',
-            name: 'Ala',
+        contacts['5550100@c.us'] = {
+            id: { _serialized: '5550100@c.us' },
+            number: '5550100',
+            name: 'Kontakt',
         };
-        contacts['48111222333@c.us'].name = 'Ala';
-        (contacts['48111222333@c.us'] as { isMyContact?: boolean }).isMyContact = true;
+        contacts['5550100@c.us'].name = 'Kontakt';
+        (contacts['5550100@c.us'] as { isMyContact?: boolean }).isMyContact = true;
         archive.refreshAfterSync();
 
         await archive.save(fakeMessage({ id: 'm2', from: '999@lid', body: 'po' }));
 
         const folders = await listFiles(dir);
-        assert.ok(folders.includes('Ala'), `foldery: ${folders.join(', ')}`);
-        assert.ok(!folders.includes('48111222333'), 'stary folder nie ma prawa zostać obok nowego');
+        assert.ok(folders.includes('Kontakt'), `foldery: ${folders.join(', ')}`);
+        assert.ok(!folders.includes('5550100'), 'stary folder nie ma prawa zostać obok nowego');
 
         // Plik zapisany pod starą nazwą przeprowadził się i ma poprawiony nagłówek.
-        const html = await fs.readFile(path.join(dir, 'Ala', 'messages_0001.html'), 'utf8');
+        const html = await fs.readFile(path.join(dir, 'Kontakt', 'messages_0001.html'), 'utf8');
         assert.ok(html.includes('przed'));
-        assert.ok(html.includes('<h1>Ala</h1>'));
+        assert.ok(html.includes('<h1>Kontakt</h1>'));
     });
 });
 
 test('niedokończona partia przeżywa nagłe zatrzymanie programu', async () => {
     await withTempDir(async (dir) => {
-        const client = fakeClient({ lidToPhone: { '999@lid': '48111222333@c.us' } });
+        const client = fakeClient({ lidToPhone: { '999@lid': '5550100@c.us' } });
 
         // Bez flushAll - tak jakby proces po prostu zniknął.
         const first = new Archive(testConfig(dir, { messagesPerFile: 10 }), client);
@@ -137,7 +167,7 @@ test('niedokończona partia przeżywa nagłe zatrzymanie programu', async () => 
         const second = new Archive(testConfig(dir, { messagesPerFile: 10 }), client);
         await second.save(fakeMessage({ id: 'm2', from: '999@lid', body: 'po restarcie' }));
 
-        const state = await readState(dir, '48111222333');
+        const state = await readState(dir, '5550100');
         assert.deepEqual(
             state.pendingMessages.map((m) => m.body),
             ['przed restartem', 'po restarcie'],
@@ -149,7 +179,7 @@ test('niedokończona partia przeżywa nagłe zatrzymanie programu', async () => 
 
 test('numer partii i licznik wiadomości nie resetują się po restarcie', async () => {
     await withTempDir(async (dir) => {
-        const client = fakeClient({ lidToPhone: { '999@lid': '48111222333@c.us' } });
+        const client = fakeClient({ lidToPhone: { '999@lid': '5550100@c.us' } });
 
         const first = new Archive(testConfig(dir, { messagesPerFile: 10 }), client);
         await first.save(fakeMessage({ id: 'm1', from: '999@lid', body: 'przed restartem' }));
@@ -159,14 +189,83 @@ test('numer partii i licznik wiadomości nie resetują się po restarcie', async
         const second = new Archive(testConfig(dir, { messagesPerFile: 10 }), client);
         await second.save(fakeMessage({ id: 'm2', from: '999@lid', body: 'po restarcie' }));
 
-        const state = await readState(dir, '48111222333');
+        const state = await readState(dir, '5550100');
         assert.equal(state.batchNum, 2, 'kolejna partia dostaje następny numer');
         assert.equal(state.totalMessages, 2, 'licznik liczy dalej, a nie od zera');
         assert.equal(state.pendingMessages.length, 1);
 
         // Druga instancja nie ma prawa założyć sobie osobnego folderu.
         const folders = await listFiles(dir);
-        assert.deepEqual(folders, ['48111222333', '_czaty.json']);
+        assert.deepEqual(folders, ['5550100', '_czaty.json']);
+    });
+});
+
+test('zwykła wiadomość nie dubluje się ani na żywo, ani po restarcie', async () => {
+    await withTempDir(async (dir) => {
+        const client = fakeClient({ lidToPhone: { '999@lid': '5550100@c.us' } });
+        const message = fakeMessage({ id: 'stale-id', from: '999@lid', body: 'raz' });
+        const first = new Archive(testConfig(dir, { messagesPerFile: 1 }), client);
+
+        assert.equal(await first.save(message), true);
+        assert.equal(await first.save(message), false);
+
+        const restarted = new Archive(testConfig(dir, { messagesPerFile: 1 }), client);
+        assert.equal(await restarted.save(message), false);
+
+        const state = await readState(dir, '5550100');
+        assert.equal(state.totalMessages, 1);
+        assert.deepEqual(state.seenIds, ['stale-id']);
+    });
+});
+
+test('nadrabianie przegląda poprzednie czaty i dopisuje tylko brakujące wiadomości', async () => {
+    await withTempDir(async (dir) => {
+        const old = fakeMessage({ id: 'stara', from: '999@lid', body: 'już mam', timestamp: 10 });
+        const missing = fakeMessage({ id: 'brakująca', from: '999@lid', body: 'do nadrobienia', timestamp: 20 });
+        let syncCalls = 0;
+        let requestedLimit = 0;
+        const client = fakeClient({ lidToPhone: { '999@lid': '5550100@c.us' } });
+        client.getChats = async () =>
+            [
+                {
+                    id: { _serialized: '999@lid' },
+                    syncHistory: async () => {
+                        syncCalls++;
+                        return true;
+                    },
+                    fetchMessages: async ({ limit }: { limit: number }) => {
+                        requestedLimit = limit;
+                        return [missing, old];
+                    },
+                },
+            ] as Awaited<ReturnType<typeof client.getChats>>;
+
+        const archive = new Archive(testConfig(dir, { messagesPerFile: 100 }), client);
+        await archive.save(old);
+
+        assert.deepEqual(await archive.backfillRecent(25), {
+            chats: 1,
+            scanned: 2,
+            saved: 1,
+            skipped: 1,
+            failedChats: 0,
+        });
+        assert.equal(syncCalls, 1);
+        assert.equal(requestedLimit, 25);
+
+        assert.deepEqual(await archive.backfillRecent(25), {
+            chats: 1,
+            scanned: 2,
+            saved: 0,
+            skipped: 2,
+            failedChats: 0,
+        });
+
+        const state = await readState(dir, '5550100');
+        assert.deepEqual(
+            state.pendingMessages.map((message) => message.body),
+            ['już mam', 'do nadrobienia'],
+        );
     });
 });
 
@@ -174,14 +273,14 @@ test('zamknięcie programu zrzuca na dysk to, co czeka w pamięci', async () => 
     await withTempDir(async (dir) => {
         const archive = new Archive(
             testConfig(dir, { messagesPerFile: 100 }),
-            fakeClient({ lidToPhone: { '999@lid': '48111222333@c.us' } }),
+            fakeClient({ lidToPhone: { '999@lid': '5550100@c.us' } }),
         );
 
         await archive.save(fakeMessage({ id: 'm1', from: '999@lid', body: 'niedokończona partia' }));
         await archive.flushAll();
 
         const html = await fs.readFile(
-            path.join(dir, '48111222333', 'messages_0001.html'),
+            path.join(dir, '5550100', 'messages_0001.html'),
             'utf8',
         );
         assert.ok(html.includes('niedokończona partia'));
@@ -191,9 +290,9 @@ test('zamknięcie programu zrzuca na dysk to, co czeka w pamięci', async () => 
 test('relacje trafiają do Statusy/<autor>, osobno od rozmowy z tą osobą', async () => {
     await withTempDir(async (dir) => {
         const client = fakeClient({
-            lidToPhone: { '999@lid': '48111222333@c.us' },
+            lidToPhone: { '999@lid': '5550100@c.us' },
             contacts: {
-                '48111222333@c.us': { id: { _serialized: '48111222333@c.us' }, number: '48111222333', name: 'Ala', isMyContact: true },
+                '5550100@c.us': { id: { _serialized: '5550100@c.us' }, number: '5550100', name: 'Kontakt', isMyContact: true },
             },
         });
         const archive = new Archive(testConfig(dir), client);
@@ -203,11 +302,11 @@ test('relacje trafiają do Statusy/<autor>, osobno od rozmowy z tą osobą', asy
             fakeMessage({ id: 'relacja', from: 'status@broadcast', author: '999@lid', isStatus: true, body: 'moja relacja' }),
         );
 
-        assert.ok((await listFiles(dir)).includes('Ala'));
-        assert.ok((await listFiles(path.join(dir, 'Statusy'))).includes('Ala'));
+        assert.ok((await listFiles(dir)).includes('Kontakt'));
+        assert.ok((await listFiles(path.join(dir, 'Statusy'))).includes('Kontakt'));
 
-        const chat = await readState(dir, 'Ala');
-        const status = await readState(dir, path.join('Statusy', 'Ala'));
+        const chat = await readState(dir, 'Kontakt');
+        const status = await readState(dir, path.join('Statusy', 'Kontakt'));
         assert.equal(chat.pendingMessages.length, 1);
         assert.equal(status.pendingMessages.length, 1);
         assert.equal(status.pendingMessages[0]?.body, 'moja relacja');
@@ -224,7 +323,7 @@ test('przegląd nie dopisuje relacji, którą już mamy - także po restarcie', 
             body: 'storka',
         });
         const client = fakeClient({
-            lidToPhone: { '999@lid': '48111222333@c.us' },
+            lidToPhone: { '999@lid': '5550100@c.us' },
             broadcasts: [{ msgs: [relacja] }],
         });
 
@@ -248,7 +347,7 @@ test('relacje bez id._serialized nie dublują się przy kolejnych przeglądach',
             fakeMessage({ id: 'HASH-B', from: '999@lid', rawStatusId: true, isStatus: true, body: 'b' }),
         ];
         const client = fakeClient({
-            lidToPhone: { '999@lid': '48111222333@c.us' },
+            lidToPhone: { '999@lid': '5550100@c.us' },
             broadcasts: [{ msgs: relacje }],
         });
 
@@ -260,7 +359,7 @@ test('relacje bez id._serialized nie dublują się przy kolejnych przeglądach',
         const restarted = new Archive(testConfig(dir, { messagesPerFile: 100 }), client);
         assert.deepEqual(await restarted.sweepStatuses(), { saved: 0, skipped: 2 });
 
-        const state = await readState(dir, path.join('Statusy', '48111222333'));
+        const state = await readState(dir, path.join('Statusy', '5550100'));
         assert.equal(state.pendingMessages.length, 2, 'dwie relacje, nie sześć');
         assert.equal(state.seenIds?.length, 2, 'identyfikatory muszą trafić na dysk');
     });
@@ -270,14 +369,14 @@ test('wiadomość skasowana, gdy jeszcze czeka w partii, dostaje znacznik w stan
     await withTempDir(async (dir) => {
         const archive = new Archive(
             testConfig(dir, { messagesPerFile: 100 }),
-            fakeClient({ lidToPhone: { '999@lid': '48111222333@c.us' } }),
+            fakeClient({ lidToPhone: { '999@lid': '5550100@c.us' } }),
         );
 
         const message = fakeMessage({ id: 'do-usuniecia', from: '999@lid', body: 'ups' });
         await archive.save(message);
         await archive.markDeleted(message);
 
-        const state = await readState(dir, '48111222333');
+        const state = await readState(dir, '5550100');
         assert.equal(state.pendingMessages[0]?.isDeleted, true);
     });
 });
@@ -286,13 +385,13 @@ test('wiadomość skasowana po zapisaniu pliku dostaje notkę wprost w HTML', as
     await withTempDir(async (dir) => {
         const archive = new Archive(
             testConfig(dir, { messagesPerFile: 1 }),
-            fakeClient({ lidToPhone: { '999@lid': '48111222333@c.us' } }),
+            fakeClient({ lidToPhone: { '999@lid': '5550100@c.us' } }),
         );
 
         const message = fakeMessage({ id: 'poszla-do-pliku', from: '999@lid', body: 'żałuję' });
         await archive.save(message);
 
-        const file = path.join(dir, '48111222333', 'messages_0001.html');
+        const file = path.join(dir, '5550100', 'messages_0001.html');
         assert.ok(!(await fs.readFile(file, 'utf8')).includes('Skasowana w WhatsAppie'));
 
         await archive.markDeleted(message);
@@ -343,11 +442,11 @@ test('wiadomości systemowe nie zaśmiecają archiwum', async () => {
 test('nazwa czatu z ukośnikiem nie zakłada folderu poza archiwum', async () => {
     await withTempDir(async (dir) => {
         const client = fakeClient({
-            lidToPhone: { '999@lid': '48111222333@c.us' },
+            lidToPhone: { '999@lid': '5550100@c.us' },
             contacts: {
-                '48111222333@c.us': {
-                    id: { _serialized: '48111222333@c.us' },
-                    number: '48111222333',
+                '5550100@c.us': {
+                    id: { _serialized: '5550100@c.us' },
+                    number: '5550100',
                     name: '../../ucieczka',
                     isMyContact: true,
                 },
@@ -383,9 +482,9 @@ test('folder po starszej wersji zostaje przejęty razem z czekającymi w nim wia
         );
 
         const client = fakeClient({
-            lidToPhone: { '999@lid': '48111222333@c.us' },
+            lidToPhone: { '999@lid': '5550100@c.us' },
             contacts: {
-                '48111222333@c.us': { id: { _serialized: '48111222333@c.us' }, number: '48111222333', name: 'Ala', isMyContact: true },
+                '5550100@c.us': { id: { _serialized: '5550100@c.us' }, number: '5550100', name: 'Kontakt', isMyContact: true },
             },
         });
         const archive = new Archive(testConfig(dir, { messagesPerFile: 100 }), client);
@@ -393,10 +492,10 @@ test('folder po starszej wersji zostaje przejęty razem z czekającymi w nim wia
         await archive.save(fakeMessage({ id: 'nowa', from: '999@lid', body: 'po przepisaniu' }));
 
         const folders = await listFiles(dir);
-        assert.ok(folders.includes('Ala'), `foldery: ${folders.join(', ')}`);
+        assert.ok(folders.includes('Kontakt'), `foldery: ${folders.join(', ')}`);
         assert.ok(!folders.includes('999'), 'stary folder nie zostaje sierotą obok nowego');
 
-        const state = await readState(dir, 'Ala');
+        const state = await readState(dir, 'Kontakt');
         assert.deepEqual(
             state.pendingMessages.map((m) => m.body),
             ['sprzed przepisania', 'po przepisaniu'],
@@ -408,7 +507,7 @@ test('spis czatów zapamiętuje, gdzie leży archiwum danej osoby', async () => 
     await withTempDir(async (dir) => {
         const archive = new Archive(
             testConfig(dir),
-            fakeClient({ lidToPhone: { '999@lid': '48111222333@c.us' } }),
+            fakeClient({ lidToPhone: { '999@lid': '5550100@c.us' } }),
         );
         await archive.save(fakeMessage({ from: '999@lid', body: 'x' }));
 
@@ -417,7 +516,7 @@ test('spis czatów zapamiętuje, gdzie leży archiwum danej osoby', async () => 
             { safeName: string }
         >;
 
-        assert.equal(index['48111222333@c.us']?.safeName, '48111222333');
-        assert.equal(index['999@lid']?.safeName, '48111222333', 'wpis jest też pod @lid');
+        assert.equal(index['5550100@c.us']?.safeName, '5550100');
+        assert.equal(index['999@lid']?.safeName, '5550100', 'wpis jest też pod @lid');
     });
 });

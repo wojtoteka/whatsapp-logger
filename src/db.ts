@@ -119,7 +119,7 @@ export const SCHEMA: readonly string[] = [
 export function toArchivePath(chatFolder: string, relative: string | null): string | null {
     if (!relative) return null;
 
-    // path.posix.join sam zwija "..", więc "Statusy/Ala" + "../_avatars/x"
+    // path.posix.join sam zwija "..", więc "Statusy/Kontakt" + "../_avatars/x"
     // daje "Statusy/_avatars/x" - dlatego liczymy to na pełnej ścieżce.
     const joined = path.posix.normalize(
         path.posix.join(toPosixPath(chatFolder), toPosixPath(relative)),

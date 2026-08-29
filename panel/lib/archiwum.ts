@@ -42,7 +42,7 @@ export function logsDir(): string {
 // ─────────────────────────────────────────────────────────────────────────
 
 /**
- * Folder w postaci nadającej się do adresu. "Statusy/Dawid" ma ukośnik,
+ * Folder w postaci nadającej się do adresu. "Statusy/Kontakt" ma ukośnik,
  * który rozbiłby ścieżkę w URL-u, więc zamieniamy go na dwa podkreślenia.
  */
 export function toSlug(folder: string): string {

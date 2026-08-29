@@ -83,7 +83,7 @@ test('podmieniony choćby o bajt skrót przestaje pasować', async () => {
 });
 
 test('login sprowadzamy do jednej postaci', () => {
-    assert.equal(normalizeLogin('  Wojtek '), 'wojtek');
+    assert.equal(normalizeLogin('  Uzytkownik '), 'uzytkownik');
     assert.equal(normalizeLogin('ADMIN'), 'admin');
 });
 

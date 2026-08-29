@@ -152,8 +152,29 @@ test('zablokowane czaty bez kodu w sesji to zupełnie inna rada', async () => {
 
     assert.equal(result.status, 'not_enabled');
     assert.equal(result.lockedCount, 1);
+    assert.deepEqual(result.lockedChatIds, ['czat']);
     assert.match(statusLine(result), /nie dostał kodu tajnego z telefonu/);
     assert.match(statusLine(result), /widzi 1 zablokowanych/);
+});
+
+test('identyfikatory zablokowanych czatów zachowujemy niezależnie od ich kształtu', async () => {
+    const client = pageClient({
+        require: () => ({
+            hasChatlockSecretCode: async () => false,
+            lockedChatsAreAccessible: async () => false,
+            validateSecretCode: async () => false,
+            getLockedChats: async () => [
+                { id: { _serialized: '111@lid' } },
+                { wid: { toString: () => '222@g.us' } },
+                '333@c.us',
+            ],
+        }),
+    });
+
+    const result = await unlock(client, 'kod', { tries: 1, waitMs: 0 });
+
+    assert.equal(result.lockedCount, 3);
+    assert.deepEqual(result.lockedChatIds, ['111@lid', '222@g.us', '333@c.us']);
 });
 
 test('kod podajemy z drugim argumentem, którego wymaga WhatsApp Web', async () => {

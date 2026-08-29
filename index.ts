@@ -9,6 +9,7 @@
 import path from 'node:path';
 import qrcode from 'qrcode-terminal';
 import { Archive } from './src/archive';
+import { checkArchive } from './src/archiveCheck';
 import { loadConfig } from './src/config';
 import { Database } from './src/db';
 import { manageUsers } from './src/uzytkownicy';
@@ -18,6 +19,7 @@ import { statusLine, unlock } from './src/lockedChats';
 import type { UnlockResult } from './src/lockedChats';
 import { Notifier } from './src/notify';
 import { runRetention } from './src/retention';
+import { EXIT_AUTH_FAILURE, EXIT_RESTART } from './src/restart';
 import type { WaClient, WaMessage } from './src/types';
 import { ensureDirSync, formatHours } from './src/util';
 import { createClient, healthLine, waitForContacts } from './src/waClient';
@@ -39,6 +41,22 @@ async function main(): Promise<void> {
         log.warn('Skopiuj .env.example do .env, żeby cokolwiek zmienić.');
     }
     for (const warning of warnings) log.warn(`Ustawienia: ${warning}`);
+
+    if (process.argv.includes('--sprawdz-archiwum')) {
+        const result = await checkArchive(config.logsDir);
+        log.blank();
+        for (const issue of result.issues) {
+            const line = `[${issue.file}] ${issue.message}`;
+            if (issue.level === 'error') log.error(line);
+            else log.warn(line);
+        }
+        log.info(
+            `Archiwum: ${result.chats} czatów, ${result.batches} zamkniętych partii, ` +
+                `${result.messages} wiadomości, błędy ${result.errors}, ostrzeżenia ${result.warnings}.`,
+        );
+        process.exitCode = result.errors > 0 ? 1 : 0;
+        return;
+    }
 
     if (process.argv.includes('--sprawdz') || process.argv.includes('--check')) {
         printConfig(config, envFileFound);
@@ -143,13 +161,13 @@ class Runtime {
             log.endProgress();
             log.error(`Uwierzytelnienie odrzucone: ${message}`);
             log.error('Usuń folder .wwebjs_auth i uruchom program ponownie, żeby zeskanować nowy kod QR.');
-            void this.notifier.authFailure(message).finally(() => process.exit(1));
+            void this.notifier.authFailure(message).finally(() => process.exit(EXIT_AUTH_FAILURE));
         });
 
         this.client.on('disconnected', (reason) => {
             log.endProgress();
             log.warn(`Rozłączono z WhatsAppem: ${String(reason)}`);
-            void this.notifier.disconnected(String(reason));
+            void this.restartAfterDisconnect(String(reason));
         });
 
         this.client.on('ready', () => {
@@ -169,7 +187,9 @@ class Runtime {
             },
         });
         log.endProgress();
-        log.info(healthLine(health));
+        // Pełne liczniki niczego nie nadrabiają ani nie mówią o archiwum.
+        // Zostawiamy tylko komunikaty diagnostyczne dla niepełnych danych.
+        if (!health.complete || health.contacts === 0) log.info(healthLine(health));
 
         // Dopiero teraz WhatsApp wie, kto jest kim - puste odpowiedzi
         // sprzed synchronizacji nie mają prawa zostać w pamięci.
@@ -184,12 +204,41 @@ class Runtime {
 
         await this.tryUnlockLockedChats();
 
+        await this.backfillMessages();
+
         log.info('✓ Archiwizuję wiadomości. Zatrzymanie: Ctrl+C.');
         log.blank();
 
         void this.notifier.ready();
         this.startRetention();
         this.startSweep();
+    }
+
+    /** Dobiera wiadomości z czasu, gdy proces nie działał. */
+    private async backfillMessages(): Promise<void> {
+        if (this.config.backfillMessagesPerChat <= 0) {
+            log.info('Nadrabianie wiadomości: wyłączone.');
+            return;
+        }
+
+        log.info(
+            `Nadrabianie wiadomości: sprawdzam do ${this.config.backfillMessagesPerChat} na czat...`,
+        );
+        const stats = await this.archive.backfillRecent();
+        const failed = stats.failedChats > 0 ? `, błędów czatów ${stats.failedChats}` : '';
+        log.info(
+            `Nadrabianie wiadomości: dopisano ${stats.saved}, ` +
+                `już zapisanych ${stats.skipped}, przejrzano ${stats.scanned} w ${stats.chats} czatach${failed}.`,
+        );
+    }
+
+    /** Kończy proces kodem, który nadzorca rozpoznaje jako awarię przejściową. */
+    private async restartAfterDisconnect(reason: string): Promise<void> {
+        try {
+            await this.notifier.disconnected(reason);
+        } finally {
+            await this.shutdown('rozłączenie', EXIT_RESTART);
+        }
     }
 
     /**
@@ -202,6 +251,9 @@ class Runtime {
 
         const previous = this.locked?.status;
         this.locked = await unlock(this.client, this.config.lockedChatPassword);
+        if (Array.isArray(this.locked.lockedChatIds)) {
+            this.archive.setLockedChatIds(this.locked.lockedChatIds);
+        }
 
         // Przy ponowieniu odzywamy się tylko wtedy, gdy coś się zmieniło.
         if (previous === undefined || previous !== this.locked.status) {
@@ -262,8 +314,8 @@ class Runtime {
 
     private async sweep(): Promise<void> {
         // Zabezpieczone czaty mogły nie zdążyć się otworzyć przy starcie.
-        // Dopóki nie ma rozstrzygnięcia, próbujemy dalej - inaczej ich
-        // wiadomości nie trafiłyby do archiwum przez całe uruchomienie.
+        // Dopóki nie ma rozstrzygnięcia, próbujemy dalej, żeby kolejne
+        // nadrabianie mogło zobaczyć również ich wcześniejszą historię.
         await this.tryUnlockLockedChats();
 
         // Relacje najpierw - żyją dobę, więc każda minuta zwłoki to ryzyko,
@@ -325,13 +377,15 @@ class Runtime {
 
         process.on('unhandledRejection', (reason) => {
             log.error('Nieobsłużony błąd w tle', reason, { stage: 'unhandledRejection' });
+            void this.shutdown('unhandledRejection', EXIT_RESTART);
         });
         process.on('uncaughtException', (err) => {
             log.error('Nieoczekiwany błąd', err, { stage: 'uncaughtException' });
+            void this.shutdown('uncaughtException', EXIT_RESTART);
         });
     }
 
-    private async shutdown(signal: string): Promise<void> {
+    private async shutdown(signal: string, exitCode = 0): Promise<void> {
         if (this.shuttingDown) return;
         this.shuttingDown = true;
 
@@ -354,8 +408,12 @@ class Runtime {
         } catch {
             // Przeglądarka mogła już zniknąć - nic nie szkodzi.
         }
-        await this.db.close();
-        process.exit(0);
+        try {
+            await this.db.close();
+        } catch (err) {
+            log.quiet(err, { stage: 'zamykanie bazy' });
+        }
+        process.exit(exitCode);
     }
 }
 
@@ -368,6 +426,7 @@ function printConfig(config: Config, envFileFound: boolean): void {
     log.info('');
     log.info(`  Archiwum                 ${config.logsDir}`);
     log.info(`  Wiadomości na plik       ${config.messagesPerFile}`);
+    log.info(`  Nadrabianie na czat      ${config.backfillMessagesPerChat}`);
     log.info(`  Pobierane media          ${[...config.mediaTypes].join(', ') || '(żadne)'}`);
     log.info(`  Limit pliku              ${config.maxMediaSizeMb} MB`);
     log.info(`  Zdjęcia profilowe        ${config.saveProfilePics ? `tak, odświeżanie co ${config.avatarRefreshDays} dni` : 'nie'}`);
