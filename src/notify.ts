@@ -103,8 +103,8 @@ export class Notifier {
         await this.send({
             title: '🟡 WhatsApp Logger - wymagany kod QR',
             description:
-                'Sesja wygasła. Uruchom program lokalnie i zeskanuj nowy kod QR ' +
-                'w WhatsApp → Urządzenia połączone.',
+                'WhatsApp wygenerował nowy kod QR. Jest widoczny w terminalu, ' +
+                'w którym działa logger. Zeskanuj go przez WhatsApp → Urządzenia połączone.',
             color: 0xeab308,
             ping: true,
             category: 'qr',

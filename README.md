@@ -346,9 +346,9 @@ Hook jest dodatkowym zabezpieczeniem, a nie zamiennikiem sprawdzenia zmian przed
 
 | Problem | Rozwiązanie |
 |---|---|
-| Nie pojawia się kod QR | Ustaw `HEADLESS=false` i sprawdź błędy startu przeglądarki. |
+| Nie pojawia się kod QR | Kod jest drukowany w terminalu także przy `HEADLESS=true`. Po `LOGOUT` logger czeka na nowe parowanie bez restartu. Jeśli sesja została wcześniej przerwana w połowie wylogowania, zatrzymaj program, usuń tylko `.wwebjs_auth` i uruchom go ponownie. Archiwum `logs/` pozostaje bez zmian. |
 | Chrome nie jest wykrywany | Ustaw pełną ścieżkę w `CHROME_PATH`. |
-| Sesja straciła autoryzację | Zatrzymaj program, usuń lokalny folder `.wwebjs_auth` i sparuj konto ponownie. |
+| Sesja straciła autoryzację | Przy `LOGOUT` poczekaj na QR w tym samym terminalu. Ręcznie usuń `.wwebjs_auth` tylko wtedy, gdy starsza wersja programu zostawiła niedokończoną sesję. |
 | Folder czatu ma nazwę złożoną z cyfr | Poczekaj na synchronizację kontaktów; po znalezieniu lepszej nazwy logger potrafi przenieść archiwum. |
 | Pojawia się komunikat o częściowych danych WhatsApp Web | Zaktualizuj `whatsapp-web.js` i ponownie przetestuj aplikację. |
 | Zbiorcze pobranie czatów kończy się krótkim błędem `r: r` | Logger próbuje rozwinąć czaty pojedynczo, dzięki czemu jeden wadliwy model nie blokuje całego nadrabiania. Liczba pominiętych czatów pojawi się w podsumowaniu. |

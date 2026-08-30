@@ -44,6 +44,7 @@ export class TauService {
             return;
         }
 
+        this.provider.start();
         this.ready = true;
         try {
             await this.jobs.start();

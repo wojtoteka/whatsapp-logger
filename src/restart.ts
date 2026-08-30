@@ -10,6 +10,15 @@ export const RESTART_MAX_ATTEMPTS = 8;
 const RESTART_BASE_DELAY_MS = 5000;
 const RESTART_MAX_DELAY_MS = 60_000;
 
+/**
+ * LOGOUT jest szczególny: whatsapp-web.js sam usuwa LocalAuth i wraca do
+ * ekranu parowania. Zamknięcie przeglądarki w reakcji na to zdarzenie ściga
+ * się z reiniekcją biblioteki i potrafi zostawić uszkodzony profil sesji.
+ */
+export function shouldRelinkWithoutRestart(reason: string): boolean {
+    return reason.trim().toUpperCase() === 'LOGOUT';
+}
+
 export interface RestartDecision {
     restart: boolean;
     delayMs: number;

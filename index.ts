@@ -20,7 +20,7 @@ import { statusLine, unlock } from './src/lockedChats';
 import type { UnlockResult } from './src/lockedChats';
 import { Notifier } from './src/notify';
 import { runRetention } from './src/retention';
-import { EXIT_AUTH_FAILURE, EXIT_RESTART } from './src/restart';
+import { EXIT_AUTH_FAILURE, EXIT_RESTART, shouldRelinkWithoutRestart } from './src/restart';
 import { TauService } from './src/tauService';
 import type { WaClient, WaMessage } from './src/types';
 import { ensureDirSync, formatHours } from './src/util';
@@ -126,6 +126,8 @@ class Runtime {
     private incrementalRetryAt = 0;
     private readyFallbackTimer: NodeJS.Timeout | null = null;
     private readyStarted = false;
+    /** Porządki po LOGOUT, na które musi zaczekać ponowne zdarzenie ready. */
+    private relinkPreparation: Promise<void> | null = null;
     private shuttingDown = false;
     /** Ostatni wynik odsłaniania zabezpieczonych czatów. */
     private locked: UnlockResult | null = null;
@@ -182,8 +184,13 @@ class Runtime {
 
         this.client.on('disconnected', (reason) => {
             log.endProgress();
-            log.warn(`Rozłączono z WhatsAppem: ${String(reason)}`);
-            void this.restartAfterDisconnect(String(reason));
+            const text = String(reason);
+            log.warn(`Rozłączono z WhatsAppem: ${text}`);
+            if (shouldRelinkWithoutRestart(text)) {
+                this.beginRelinkAfterLogout(text);
+            } else {
+                void this.restartAfterDisconnect(text);
+            }
         });
 
         this.client.on('ready', () => {
@@ -225,6 +232,15 @@ class Runtime {
         if (this.shuttingDown || this.readyStarted) return;
         this.readyStarted = true;
         this.clearReadyFallback();
+
+        // Przy LOGOUT biblioteka emituje disconnected zanim skończy usuwać
+        // LocalAuth i przygotuje nową sesję. Nie uruchamiamy zadań archiwum
+        // ani ?tau, dopóki poprzednia sesja nie została spokojnie domknięta.
+        if (this.relinkPreparation) {
+            await this.relinkPreparation;
+            this.relinkPreparation = null;
+            if (this.shuttingDown) return;
+        }
 
         const health = await waitForContacts(this.client, {
             onProgress: (state) => {
@@ -392,6 +408,57 @@ class Runtime {
         } finally {
             await this.shutdown('rozłączenie', EXIT_RESTART);
         }
+    }
+
+    /**
+     * Utrata sparowania nie jest zwykłą awarią połączenia. whatsapp-web.js
+     * pozostawia tę samą stronę otwartą, kasuje LocalAuth i za chwilę emituje
+     * `qr`. Nie wolno wtedy wywołać destroy(), bo przerwiemy ten mechanizm.
+     */
+    private beginRelinkAfterLogout(reason: string): void {
+        if (this.relinkPreparation || this.shuttingDown) return;
+
+        this.readyStarted = false;
+        this.locked = null;
+        this.clearReadyFallback();
+        this.pauseOperationalTimers();
+        this.incrementalFailures = 0;
+        this.incrementalRetryAt = 0;
+
+        log.info('Sesja została wylogowana. Czekam na nowy kod QR w tym terminalu...');
+        this.relinkPreparation = this.prepareForRelink(reason);
+    }
+
+    private async prepareForRelink(reason: string): Promise<void> {
+        const tasks = [
+            { stage: 'powiadomienie Discord', promise: this.notifier.disconnected(reason) },
+            { stage: 'zatrzymanie tau', promise: this.tau.stop() },
+            { stage: 'zapis archiwum', promise: this.archive.flushAll() },
+        ] as const;
+        const results = await Promise.allSettled(tasks.map((task) => task.promise));
+        let complete = true;
+        results.forEach((result, index) => {
+            if (result.status === 'fulfilled') return;
+            complete = false;
+            // Błąd dodatku lub zapisu nie może zamknąć strony przed QR.
+            log.error('Błąd przygotowania ponownego parowania', result.reason, {
+                stage: tasks[index]!.stage,
+            });
+        });
+        if (complete) {
+            log.info('✓ Dane sprzed wylogowania zapisane. Logger czeka na ponowne sparowanie.');
+        } else {
+            log.warn('Logger czeka na ponowne sparowanie, ale część porządków zakończyła się błędem.');
+        }
+    }
+
+    private pauseOperationalTimers(): void {
+        if (this.retentionTimer) clearInterval(this.retentionTimer);
+        if (this.sweepTimer) clearInterval(this.sweepTimer);
+        if (this.incrementalTimer) clearInterval(this.incrementalTimer);
+        this.retentionTimer = null;
+        this.sweepTimer = null;
+        this.incrementalTimer = null;
     }
 
     /**
@@ -570,9 +637,7 @@ class Runtime {
         log.blank();
         log.info(`Zatrzymuję (${signal}). Zapisuję to, co czeka w pamięci...`);
 
-        if (this.retentionTimer) clearInterval(this.retentionTimer);
-        if (this.sweepTimer) clearInterval(this.sweepTimer);
-        if (this.incrementalTimer) clearInterval(this.incrementalTimer);
+        this.pauseOperationalTimers();
         this.clearReadyFallback();
 
         try {

@@ -5,6 +5,7 @@ import {
     EXIT_AUTH_FAILURE,
     RESTART_MAX_ATTEMPTS,
     RESTART_WINDOW_MS,
+    shouldRelinkWithoutRestart,
 } from '../src/restart';
 
 test('kolejne awarie dostają rosnące opóźnienie z limitem jednej minuty', () => {
@@ -36,4 +37,11 @@ test('stare awarie wypadają z okna i nie blokują późniejszego restartu', () 
 test('czyste wyjście i utrata autoryzacji nie są ponawiane', () => {
     assert.equal(decideLoggerRestart(0, []).reason, 'clean_exit');
     assert.equal(decideLoggerRestart(EXIT_AUTH_FAILURE, []).reason, 'auth_failure');
+});
+
+test('tylko LOGOUT przechodzi do nowego QR bez restartowania przeglądarki', () => {
+    assert.equal(shouldRelinkWithoutRestart('LOGOUT'), true);
+    assert.equal(shouldRelinkWithoutRestart(' logout '), true);
+    assert.equal(shouldRelinkWithoutRestart('UNPAIRED'), false);
+    assert.equal(shouldRelinkWithoutRestart('NAVIGATION'), false);
 });

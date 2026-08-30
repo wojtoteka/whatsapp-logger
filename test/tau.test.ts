@@ -190,6 +190,23 @@ test('provider przyjmuje tylko oznaczoną odpowiedź i szereguje requesty', asyn
     provider.stop();
 });
 
+test('provider ?tau można wznowić po ponownym sparowaniu WhatsAppa', async () => {
+    const sent: Array<{ to: string; body: string }> = [];
+    const provider = new WhatsAppTauProvider(providerClient(sent), '18002428478', 5000);
+    const context = [{ author: 'Albert', timestamp: 1, text: 'cześć', deleted: false }];
+
+    provider.stop();
+    await assert.rejects(provider.ask('przed wznowieniem', context), /zatrzymany/);
+
+    provider.start();
+    const answer = provider.ask('po wznowieniu', context);
+    await waitUntil(() => sent.length === 1);
+    const marker = markerFrom(sent[0]!.body);
+    await provider.acceptIncoming(providerMessage(`${marker}\ndziała ponownie`));
+    assert.equal(await answer, 'działa ponownie');
+    provider.stop();
+});
+
 test('?tau wykonuje tylko polecenie właściciela i nigdy nie wysyła odpowiedzi rozmówcy', async () => {
     await withTempDir(async (dir) => {
         await writeConversation(dir, '111111111@c.us', 'Albert', 'Albert');

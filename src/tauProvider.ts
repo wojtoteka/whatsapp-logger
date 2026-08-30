@@ -100,6 +100,12 @@ export class WhatsAppTauProvider {
         }
     }
 
+    /** Pozwala użyć tej samej usługi po ponownym sparowaniu WhatsAppa. */
+    start(): void {
+        this.stopped = false;
+        this.providerId = null;
+    }
+
     stop(): void {
         this.stopped = true;
         const active = this.active;
