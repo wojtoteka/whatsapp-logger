@@ -136,7 +136,9 @@ Providerem jest zwykły chat WhatsApp z numerem `+1 800 242 8478`. Po starcie lo
 ?tau o czym ostatnio rozmawialiśmy?
 ```
 
-Logger przekazuje wyłącznie ostatnie maksymalnie 200 wiadomości typu tekstowego z tej rozmowy. Pomija multimedia, wcześniejsze polecenia `?tau`, wcześniejsze odpowiedzi `[TAU]` i inne czaty. Odpowiedź trafia do własnego chatu właściciela, nigdy automatycznie do analizowanego rozmówcy.
+Logger przekazuje wyłącznie ostatnie maksymalnie 200 wiadomości typu tekstowego z tej rozmowy. Pomija multimedia, wcześniejsze polecenia `?tau`, wcześniejsze odpowiedzi `[TAU]` i inne czaty.
+
+Odpowiedź wraca tam, gdzie padło polecenie: `?tau` wpisane w rozmowie z kimś odsyła wiadomość `[TAU]` do tej samej rozmowy, więc widzi ją również rozmówca. Błędy, podpowiedzi i niejednoznaczne dopasowania idą zawsze do własnego chatu właściciela, nigdy do rozmówcy. Polecenie zadane we własnym chacie zostaje w nim razem z odpowiedzią.
 
 Wiadomość z `?tau` wysłana przez inną osobę zostaje tylko zarchiwizowana. Backend wymaga jednocześnie `message.fromMe === true` oraz `message.id.fromMe === true`. Własne wiadomości generowane przez aplikację są dodatkowo oznaczane i nie mogą uruchomić parsera ponownie.
 
@@ -157,7 +159,7 @@ Ważne ograniczenia:
 - centralna instrukcja bezpieczeństwa jest wysyłana jako zwykły tekst, a nie jako techniczny system prompt;
 - requesty są wykonywane pojedynczo, a odpowiedź musi zawierać unikalny marker konkretnego zapytania; wiadomości bez markera są ignorowane;
 - nie ma technicznej gwarancji, że provider nie wykorzysta własnej wcześniejszej historii chatu. Każdy request zawiera pełny bieżący kontekst i polecenie ignorowania starej historii, ale jest to izolacja best-effort;
-- polecenie wpisane w zwykłej rozmowie zostało już wysłane rozmówcy, zanim `message_create` dotrze do loggera. Do całkowicie prywatnych pytań użyj własnego chatu albo panelu;
+- polecenie wpisane w zwykłej rozmowie zostało już wysłane rozmówcy, zanim `message_create` dotrze do loggera, a odpowiedź `[TAU]` trafia do tej samej rozmowy. Do całkowicie prywatnych pytań użyj własnego chatu albo panelu;
 - awaria i timeout AI nie zatrzymują archiwizacji. Po restarcie przerwanego zadania panel nie wysyła kontekstu ponownie automatycznie.
 
 ## Przydatne polecenia
@@ -181,13 +183,19 @@ Ważne ograniczenia:
 
 Po połączeniu logger przegląda ostatnie wiadomości dostępne w WhatsApp Web. Przy zwykłym starcie robi to wyłącznie dla czatów, które mają już folder w archiwum. Domyślnie zaczyna od 250 pozycji. Jeżeli nie znajdzie zapisanego checkpointu, stopniowo pogłębia okno, maksymalnie do 50 000 wiadomości, zamiast skanować całą historię od początku.
 
+Gdy archiwum jest jeszcze puste, pierwsze uruchomienie samo wykonuje pełne nadrabianie i dopiero potem przechodzi do normalnej pracy. Nie trzeba do tego osobnego polecenia.
+
+Listę czatów logger czyta wprost z kolekcji `Store` w stronie WhatsApp Web. Zbiorcze `getChats()` i pojedyncze `getChatById()` serializują cały model czatu i potrafią odrzucić wywołanie błędem `r: r` przez jedną wadliwą grupę - wtedy nadrabianie nie miało czego przejrzeć. Publiczne API zostaje planem awaryjnym. Do listy zawsze dokładane są rozmowy ze spisu `logs/_czaty.json`, nawet jeżeli bieżąca sesja nie ma ich jeszcze w `Store`.
+
+O tym, czy wiadomość jest nowa, decyduje wyłącznie jej identyfikator. Checkpoint mówi tylko, jak głęboko sięgnąć po historię, i nie odcina niczego po znaczniku czasu - inaczej wiadomość dosłana z opóźnieniem, z datą starszą niż ostatnia zapisana, nie trafiłaby do archiwum już nigdy.
+
 Aby świadomie przeskanować wszystkie czaty widoczne dla sesji i utworzyć foldery także dla wcześniej niearchiwizowanych rozmów, uruchom:
 
 ```powershell
 npm start -- --nadrob-wszystko
 ```
 
-To polecenie działa jednorazowo: nie uruchamia panelu i kończy pracę po zapisaniu znalezionych wiadomości. Pobiera listę wszystkich czatów widocznych dla sesji, również nieznanych lokalnie, a dostępną historię przekazuje do loggera partiami po 250 modeli. Limit `BACKFILL_MESSAGES_PER_CHAT` dotyczy tylko zwykłej synchronizacji przyrostowej.
+To polecenie działa jednorazowo: nie uruchamia panelu i kończy pracę po zapisaniu znalezionych wiadomości. Pobiera listę wszystkich czatów widocznych dla sesji, również nieznanych lokalnie, a dodatkowo każdą osobę z książki adresowej tego konta - także taką, z którą rozmowa nie jest jeszcze otwarta w tej sesji. Dostępną historię przekazuje do loggera partiami po 250 modeli. Folder powstaje wyłącznie dla rozmów, w których faktycznie coś jest. Limit `BACKFILL_MESSAGES_PER_CHAT` dotyczy tylko zwykłej synchronizacji przyrostowej.
 
 Najpierw wykorzystywany jest stabilny identyfikator nadany przez WhatsApp. Jeżeli wyjątkowo go brakuje, aplikacja tworzy deterministyczny identyfikator zastępczy z czasu i skrótu danych wiadomości. Dzięki temu ta sama wiadomość odebrana na żywo i znaleziona później podczas nadrabiania nie powinna pojawić się dwa razy.
 
@@ -242,6 +250,10 @@ Pełny wzór z komentarzami znajduje się w `.env.example`. Pusta wartość ozna
 | `RETENTION_ENABLED` | `true` | Włącza automatyczne usuwanie starych danych. |
 | `RETENTION_DAYS` | `180` | Wiek usuwanych wiadomości i mediów w dniach. |
 | `RETENTION_CHECK_HOURS` | `12` | Odstęp między kontrolami retencji. |
+
+Relacje są czytane wprost z kolekcji `Store.Status`. `getBroadcasts()` z biblioteki składa je z `status.serialize()`, a nowsze wydania WhatsApp Weba potrafią oddać relację bez listy wiadomości - przegląd nie miał wtedy czego dopisać. Publiczne API zostaje planem awaryjnym.
+
+Skasowanie relacji z archiwum znaczy „pobierz ją jeszcze raz". Gdy folderu albo `_state.json` już nie ma, logger zapomina ten czat i przy najbliższym przeglądzie zapisuje relację od nowa - o ile WhatsApp nadal ją pokazuje, bo relacja żyje dobę.
 
 ### Panel, baza i integracje
 
@@ -351,7 +363,7 @@ Hook jest dodatkowym zabezpieczeniem, a nie zamiennikiem sprawdzenia zmian przed
 | Sesja straciła autoryzację | Przy `LOGOUT` poczekaj na QR w tym samym terminalu. Ręcznie usuń `.wwebjs_auth` tylko wtedy, gdy starsza wersja programu zostawiła niedokończoną sesję. |
 | Folder czatu ma nazwę złożoną z cyfr | Poczekaj na synchronizację kontaktów; po znalezieniu lepszej nazwy logger potrafi przenieść archiwum. |
 | Pojawia się komunikat o częściowych danych WhatsApp Web | Zaktualizuj `whatsapp-web.js` i ponownie przetestuj aplikację. |
-| Zbiorcze pobranie czatów kończy się krótkim błędem `r: r` | Logger próbuje rozwinąć czaty pojedynczo, dzięki czemu jeden wadliwy model nie blokuje całego nadrabiania. Gdy WhatsApp nie odda listy czatów w ogóle, nadrabianie idzie po rozmowach ze spisu `logs/_czaty.json` i oznacza zakres jako niepełny. Liczba pominiętych czatów pojawi się w podsumowaniu. |
+| Zbiorcze pobranie czatów kończy się krótkim błędem `r: r` | Lista czatów i historia są czytane wprost z `Store`, z pominięciem serializacji modeli, która ten błąd wywołuje. Publiczne `getChats()` i `getChatById()` są używane dopiero jako plan awaryjny, a spis `logs/_czaty.json` jako ostatni. Zakres, którego nie udało się objąć, jest oznaczany jako niepełny, a liczba pominiętych czatów pojawia się w podsumowaniu. |
 | W archiwum jest notatka „nie udało się pobrać pliku" | Pobranie jest ponawiane, bo WhatsApp Web oddaje pustkę również w trakcie ściągania. Pliku z relacji sprzed doby albo z wygasłego załącznika nie odzyska już nikt - notatka zostaje w archiwum wraz z typem i rozmiarem. |
 | Zabezpieczony czat nie został odsłonięty | Nowe wiadomości nadal są zapisywane; WhatsApp Web może jedynie nie udostępnić wcześniejszej historii. |
 | Panel nie startuje | Uruchom `npm run panel:build`, a potem ponownie `npm start`. |

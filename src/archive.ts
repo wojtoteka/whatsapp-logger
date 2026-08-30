@@ -43,6 +43,10 @@ import {
 import { NameTier } from './types';
 import {
     clearFullHistoryScan,
+    fetchMessagesRaw,
+    listChatsRaw,
+    listContactChatIds,
+    listStatusMessages,
     prepareFullHistoryScan,
     readFullHistoryBatch,
 } from './waClient';
@@ -159,8 +163,23 @@ export interface BackfillProgress {
 
 type BackfillChat = Awaited<ReturnType<WaClient['getChats']>>[number];
 
+/**
+ * Czat przygotowany do nadrobienia. Świadomie nie jest to model z biblioteki:
+ * getChats() i getChatById() budują go przez getChatModel(), a ten potrafi
+ * wywrócić się na jednej grupie i zabrać ze sobą całą listę. Historii i tak
+ * nie czytamy z modelu, tylko wprost ze Store, więc trzymamy tu wyłącznie to,
+ * czego nadrabianie faktycznie używa.
+ */
+interface BackfillTarget {
+    id: string | null;
+    name: string;
+    /** Prośba do urządzenia głównego o świeższą historię. */
+    syncHistory: (() => Promise<boolean>) | null;
+    fetchMessages: (limit: number) => Promise<WaMessage[]>;
+}
+
 interface BackfillChatList {
-    chats: BackfillChat[];
+    chats: BackfillTarget[];
     skippedNewChats: number;
     failedChats: number;
     newChatIds: string[];
@@ -198,6 +217,14 @@ export class Archive {
     /** Folder archiwum - potrzebny modułowi kasującemu stare pliki. */
     get logsDir(): string {
         return this.config.logsDir;
+    }
+
+    /**
+     * Czy w archiwum nie ma jeszcze ani jednej rozmowy. Świeża instalacja ma
+     * z czego nadrobić całą dostępną historię, a nie tylko ostatnie okno.
+     */
+    get isEmpty(): boolean {
+        return this.archivedChatIds().length === 0;
     }
 
     /**
@@ -487,15 +514,15 @@ export class Archive {
 
         const chatTotal = listed.chats.length;
         for (const [chatIndex, chat] of listed.chats.entries()) {
-            const chatId = chat.id?._serialized ?? null;
-            const chatName = chat.name?.trim() || chatId || 'nieznany czat';
+            const chatId = chat.id;
+            const chatName = chat.name.trim() || chatId || 'nieznany czat';
             const chatStart = 10 + (chatIndex / chatTotal) * 90;
             const chatShare = 90 / chatTotal;
             stats.chats++;
             try {
                 // Prosimy urządzenie główne o świeżą historię, ale brak tej
                 // możliwości nie blokuje odczytu tego, co już ma Web.
-                if (typeof chat.syncHistory === 'function') {
+                if (chat.syncHistory) {
                     progress(
                         chatStart + chatShare * 0.1,
                         'syncing',
@@ -540,7 +567,7 @@ export class Archive {
                                     throw new Error('WhatsApp Web przerwał odczyt przygotowanej historii');
                                 }
                                 newest = messages[messages.length - 1] ?? newest;
-                                await this.saveBackfillBatch(messages, stats, knownIds, null);
+                                await this.saveBackfillBatch(messages, stats, knownIds);
                                 const done = Math.min(offset + messages.length, scan.total);
                                 const part = scan.total > 0 ? done / scan.total : 1;
                                 progress(
@@ -574,7 +601,7 @@ export class Archive {
                     );
                 }
                 let requestedLimit = wanted;
-                let messages = (await chat.fetchMessages({ limit: requestedLimit })) as WaMessage[];
+                let messages = (await chat.fetchMessages(requestedLimit)) as WaMessage[];
 
                 const checkpoint = fullHistory ? null : await this.checkpointFor(chatId);
                 if (checkpoint && Number.isFinite(requestedLimit)) {
@@ -596,7 +623,7 @@ export class Archive {
                             `pogłębiam zakres do ${requestedLimit} wiadomości`,
                             chatName,
                         );
-                        messages = (await chat.fetchMessages({ limit: requestedLimit })) as WaMessage[];
+                        messages = (await chat.fetchMessages(requestedLimit)) as WaMessage[];
                     }
                     if (
                         !containsCheckpoint(messages, checkpoint) &&
@@ -642,11 +669,12 @@ export class Archive {
                         else stats.skipped++;
                         continue;
                     }
-                    if (checkpoint && !fullHistory && !isAfterCheckpoint(message, checkpoint)) {
-                        stats.skipped++;
-                        continue;
-                    }
-
+                    // Świadomie nie odcinamy tu niczego po czasie. Checkpoint
+                    // mówi tylko, jak głęboko sięgnąć po historię; o tym, czy
+                    // wiadomość jest nowa, decyduje wyłącznie jej identyfikator.
+                    // Odcinanie po znaczniku czasu gubiło wiadomości, które
+                    // WhatsApp dosłał z opóźnieniem - z datą starszą niż
+                    // ostatnia zapisana - i taka luka nie zamykała się już nigdy.
                     if (await this.save(message, { ...(knownIds ? { knownIds } : {}) })) {
                         stats.saved++;
                         const id = messageKey(message);
@@ -688,17 +716,12 @@ export class Archive {
         messages: readonly WaMessage[],
         stats: BackfillStats,
         knownIds: Set<string> | null,
-        checkpoint: SyncCheckpoint | null,
     ): Promise<void> {
         for (const message of messages) {
             stats.scanned++;
             if (message.type === 'revoked') {
                 if (await this.markDeleted(message)) stats.updated++;
                 else stats.skipped++;
-                continue;
-            }
-            if (checkpoint && !isAfterCheckpoint(message, checkpoint)) {
-                stats.skipped++;
                 continue;
             }
             if (await this.save(message, { ...(knownIds ? { knownIds } : {}) })) {
@@ -793,14 +816,19 @@ export class Archive {
     }
 
     /**
-     * getChats() w whatsapp-web.js serializuje wszystkie czaty równolegle.
-     * Jeden wadliwy model (obecnie najczęściej grupa) odrzuca wtedy całą
-     * listę krótkim błędem "r: r". Jeśli mamy dostęp do strony, pobieramy
-     * więc najpierw same identyfikatory i rozwijamy czaty pojedynczo. Jeden
-     * problematyczny czat nie blokuje dzięki temu wszystkich pozostałych.
+     * Kompletuje listę czatów do nadrobienia.
      *
-     * Klienci testowi i przyszłe wersje biblioteki bez pupPage korzystają z
-     * publicznego getChats() jako bezpiecznego planu B.
+     * Kolejność źródeł nie jest przypadkowa. getChats() i getChatById()
+     * serializują cały model czatu, a jeden wadliwy (najczęściej grupa, do
+     * której nie da się dociągnąć metadanych) odrzuca wywołanie krótkim
+     * "r: r". Przy zbiorczym getChats() ginęła przez to cała lista, a przy
+     * pojedynczym getChatById() - każdy czat po kolei, co zostawiało
+     * nadrabianie bez czegokolwiek do przejrzenia.
+     *
+     * Dlatego najpierw czytamy kolekcję Store wprost, bez serializacji.
+     * Publiczne API zostaje planem awaryjnym dla klientów testowych i wydań
+     * biblioteki bez dostępu do strony, a spis archiwum - ostatnią deską
+     * ratunku, żeby znane rozmowy nadrobiły się nawet wtedy.
      */
     private async chatsForBackfill(
         includeNewChats: boolean,
@@ -813,9 +841,26 @@ export class Archive {
             newChatIds: [],
         };
 
-        const ids = await this.rawChatIds();
-        if (ids) {
-            await this.openChatsById(ids, includeNewChats, result, onOpening);
+        const raw = await listChatsRaw(this.client);
+
+        // Świeża instalacja nie ma jeszcze czatów w Store - są tam dopiero te
+        // otwierane w tej sesji. Pełne nadrabianie ma objąć wszystkich, więc
+        // dokładamy każdego rozmówcę z książki adresowej tego konta.
+        const contacts = includeNewChats ? await listContactChatIds(this.client) : null;
+
+        if (raw || contacts) {
+            const names = new Map((raw ?? []).map((chat) => [chat.id, chat.name]));
+            const ids = new Set<string>(names.keys());
+            for (const id of contacts ?? []) ids.add(id);
+            // Rozmowa bywa w archiwum, a w Store tej sesji jeszcze nie -
+            // wtedy to spis archiwum jest jedynym śladem, że w ogóle istnieje.
+            for (const id of this.archivedChatIds()) ids.add(id);
+
+            log.debug(
+                `Nadrabianie: ${raw?.length ?? 0} czatów ze strony, ` +
+                    `${contacts?.length ?? 0} kontaktów, razem ${ids.size} do sprawdzenia.`,
+            );
+            await this.openChatsById([...ids], includeNewChats, result, onOpening, names);
             return result;
         }
 
@@ -823,9 +868,6 @@ export class Archive {
         try {
             chats = await this.client.getChats();
         } catch (err) {
-            // Ostatnia deska ratunku: czaty ze spisu archiwum. Bez niej jeden
-            // wadliwy model odbierał nadrabianie wszystkim pozostałym, więc po
-            // każdym offline zostawała dziura w rozmowach, które są tu od dawna.
             const known = this.archivedChatIds();
             if (known.length === 0) throw err;
 
@@ -846,25 +888,31 @@ export class Archive {
                 continue;
             }
             if (includeNewChats && chatId && !exists) result.newChatIds.push(chatId);
-            result.chats.push(chat);
+            result.chats.push(targetFromChat(chat, chatId));
             onOpening?.(result.chats.length, chats.length, chat.name?.trim() || chatId || 'nieznany czat');
         }
         return result;
     }
 
-    /** Otwiera czaty pojedynczo, po identyfikatorach. */
+    /**
+     * Wybiera czaty po identyfikatorach. Modelu czatu tu nie otwieramy -
+     * historię czyta się wprost ze Store, a gdyby strona była niedostępna,
+     * dopiero wtedy sięgamy po getChatById(). Awaria jednego czatu ujawnia
+     * się więc przy jego własnym odczycie i nie dotyka pozostałych.
+     */
     private async openChatsById(
         ids: readonly string[],
         includeNewChats: boolean,
         result: BackfillChatList,
         onOpening?: (current: number, total: number, chat: string) => void,
+        names?: ReadonlyMap<string, string>,
     ): Promise<void> {
         const selected: string[] = [];
         // Ten sam czat bywa w spisie pod numerem i pod @lid. Otwieramy go raz,
         // zaczynając od numeru - dla niego WhatsApp częściej oddaje komplet danych.
         const seenFolders = new Set<string>();
 
-        for (const chatId of [...ids].sort(phoneIdsFirst)) {
+        for (const chatId of [...new Set(ids)].sort(phoneIdsFirst)) {
             const folder = this.index.get(chatId)?.safeName ?? null;
             if (folder && seenFolders.has(folder)) continue;
 
@@ -879,50 +927,35 @@ export class Archive {
         }
 
         for (const [index, chatId] of selected.entries()) {
-            try {
-                const chat = await this.client.getChatById(chatId);
-                if (chat) {
-                    result.chats.push(chat);
-                    onOpening?.(index + 1, selected.length, chat.name?.trim() || chatId);
-                } else {
-                    result.failedChats++;
-                    onOpening?.(index + 1, selected.length, chatId);
-                }
-            } catch (err) {
-                result.failedChats++;
-                log.quiet(err, { stage: 'nadrabianie: pobranie czatu', chat: chatId });
-                onOpening?.(index + 1, selected.length, chatId);
-            }
+            const name = names?.get(chatId) ?? this.index.get(chatId)?.name ?? '';
+            result.chats.push(this.targetById(chatId, name));
+            onOpening?.(index + 1, selected.length, name.trim() || chatId);
         }
+    }
+
+    /** Czat czytany po identyfikatorze, z publicznym API jako planem awaryjnym. */
+    private targetById(chatId: string, name: string): BackfillTarget {
+        return {
+            id: chatId,
+            name,
+            syncHistory:
+                typeof this.client.syncHistory === 'function'
+                    ? () => this.client.syncHistory(chatId)
+                    : null,
+            fetchMessages: async (limit) => {
+                const raw = await fetchMessagesRaw(this.client, chatId, limit);
+                if (raw) return raw;
+
+                const chat = await this.client.getChatById(chatId);
+                if (!chat) throw new Error(`WhatsApp nie otworzył czatu ${chatId}`);
+                return (await chat.fetchMessages({ limit })) as WaMessage[];
+            },
+        };
     }
 
     /** Czaty ze spisu archiwum. Relacje mają własny przegląd i tu nie należą. */
     private archivedChatIds(): string[] {
         return [...this.index.keys()].filter((id) => id.includes('@') && !isStatusChat(id));
-    }
-
-    /** Same ID czatów, bez zawodnej serializacji pełnych modeli. */
-    private async rawChatIds(): Promise<string[] | null> {
-        const page = this.client.pupPage;
-        if (!page || typeof page.evaluate !== 'function') return null;
-
-        try {
-            const ids = await page.evaluate((): string[] | null => {
-                /* eslint-disable @typescript-eslint/no-explicit-any */
-                const root = globalThis as any;
-                const store = root.window?.Store ?? root.Store;
-                if (!store?.Chat?.getModelsArray) return null;
-
-                return store.Chat.getModelsArray()
-                    .map((chat: any) => chat?.id?._serialized)
-                    .filter((id: unknown): id is string => typeof id === 'string' && id.length > 0);
-                /* eslint-enable @typescript-eslint/no-explicit-any */
-            });
-            return ids ? [...new Set(ids)] : null;
-        } catch (err) {
-            log.quiet(err, { stage: 'nadrabianie: surowa lista ID czatów' });
-            return null;
-        }
     }
 
     /**
@@ -1118,6 +1151,10 @@ export class Archive {
         const saved = await readJson<ChatStateFile>(path.join(chatDir, '_state.json'));
         const seenIds = await this.loadRecentSeenIds(chatDir, saved);
 
+        // _state.json bywa skasowany ręcznie, a zamknięte partie zostają.
+        // Numer bierzemy wtedy z dysku, żeby zapis nie nadpisał messages_0001.
+        const batchNum = Math.max(saved?.batchNum ?? 1, (await lastBatchNumber(chatDir)) + 1);
+
         const state: ChatState = {
             id: chatId,
             name: useName,
@@ -1126,7 +1163,7 @@ export class Archive {
             safeName,
             chatDir,
             mediaDir,
-            batchNum: saved?.batchNum ?? 1,
+            batchNum,
             totalMessages: saved?.totalMessages ?? 0,
             pending: Array.isArray(saved?.pendingMessages) ? saved.pendingMessages : [],
             seenIds,
@@ -1449,35 +1486,46 @@ export class Archive {
     async sweepStatuses(): Promise<StatusSweepStats> {
         const stats: StatusSweepStats = { saved: 0, skipped: 0 };
         if (!this.config.saveStatuses) return stats;
-        if (typeof this.client.getBroadcasts !== 'function') return stats;
 
-        let broadcasts;
-        try {
-            broadcasts = (await this.client.getBroadcasts()) ?? [];
-        } catch (err) {
-            log.error('Nie udało się pobrać listy relacji', err, { stage: 'getBroadcasts' });
-            return stats;
-        }
+        const messages = await this.statusMessages();
+        log.debug(`Przegląd relacji: WhatsApp pokazuje ${messages.length} relacji.`);
 
-        for (const broadcast of broadcasts) {
-            for (const raw of broadcast?.msgs ?? []) {
-                const message = raw as WaMessage;
-                if (this.statusAlreadySaved(message)) {
-                    stats.skipped++;
-                    continue;
-                }
-                try {
-                    if (await this.save(message, { forceStatus: true })) stats.saved++;
-                    else stats.skipped++;
-                } catch (err) {
-                    log.quiet(err, {
-                        stage: 'relacja z przeglądu',
-                        messageId: messageKey(message),
-                    });
-                }
+        for (const message of messages) {
+            if (this.statusAlreadySaved(message)) {
+                stats.skipped++;
+                continue;
+            }
+            try {
+                if (await this.save(message, { forceStatus: true })) stats.saved++;
+                else stats.skipped++;
+            } catch (err) {
+                log.quiet(err, {
+                    stage: 'relacja z przeglądu',
+                    messageId: messageKey(message),
+                });
             }
         }
         return stats;
+    }
+
+    /**
+     * Relacje widoczne dla tej sesji. Najpierw wprost z kolekcji Store:
+     * getBroadcasts() składa je z status.serialize(), a to w nowszych
+     * wydaniach WhatsApp Weba potrafi oddać relację bez listy wiadomości -
+     * przegląd nie miał wtedy czego dopisać i wyglądało to na brak relacji.
+     */
+    private async statusMessages(): Promise<WaMessage[]> {
+        const raw = await listStatusMessages(this.client);
+        if (raw && raw.length > 0) return raw;
+
+        if (typeof this.client.getBroadcasts !== 'function') return [];
+        try {
+            const broadcasts = (await this.client.getBroadcasts()) ?? [];
+            return broadcasts.flatMap((broadcast) => (broadcast?.msgs ?? []) as WaMessage[]);
+        } catch (err) {
+            log.error('Nie udało się pobrać listy relacji', err, { stage: 'getBroadcasts' });
+            return [];
+        }
     }
 
     /**
@@ -1489,17 +1537,45 @@ export class Archive {
         const msgId = messageKey(message);
         if (!author || !msgId) return false;
 
-        const chatId = statusChatId(author);
+        // Relacja niesie identyfikator autora prosto z WhatsAppa, a archiwum
+        // prowadzimy pod kluczem ustalonym przy pierwszym zapisie - zwykle
+        // numerem telefonu. Bez przejścia przez skrót pytalibyśmy o czat,
+        // którego pod tą nazwą nie ma.
+        const aliasKey = statusChatId(author);
+        const chatId = this.aliases.get(aliasKey) ?? aliasKey;
         const state = this.states.get(chatId);
+        const known = this.index.get(chatId) ?? this.index.get(aliasKey);
+        const dir =
+            state?.chatDir ??
+            (known?.safeName ? path.join(this.config.logsDir, known.safeName) : null);
+        if (!dir) return false;
+
+        // Skasowanie relacji z archiwum ma znaczyć "pobierz ją jeszcze raz".
+        // Sama pamięć identyfikatorów tego nie widzi - trzymała je nawet po
+        // usunięciu folderu, więc relacja nie wracała już nigdy. Pytamy więc
+        // dysk: gdy stanu czatu tam nie ma, zapominamy go i zaczynamy od zera.
+        const saved = readJsonSync<ChatStateFile>(path.join(dir, '_state.json'));
+        if (!saved) {
+            this.forgetChat(chatId);
+            return false;
+        }
+
         if (state) return state.seenIds.includes(msgId);
+        return Array.isArray(saved.seenIds) && saved.seenIds.includes(msgId);
+    }
 
-        const known = this.index.get(chatId);
-        if (!known?.safeName) return false;
+    /**
+     * Wyrzuca czat z pamięci procesu. Następny zapis odtworzy go z tego, co
+     * faktycznie leży na dysku - razem z numerem partii i listą znanych ID.
+     */
+    private forgetChat(chatId: string): void {
+        const state = this.states.get(chatId);
+        if (state?.saveTimer) clearTimeout(state.saveTimer);
+        this.states.delete(chatId);
 
-        const saved = readJsonSync<ChatStateFile>(
-            path.join(this.config.logsDir, known.safeName, '_state.json'),
-        );
-        return Array.isArray(saved?.seenIds) && saved.seenIds.includes(msgId);
+        for (const [alias, target] of this.aliases) {
+            if (target === chatId || alias === chatId) this.aliases.delete(alias);
+        }
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -1742,6 +1818,28 @@ function phoneIdsFirst(a: string, b: string): number {
     return rank(a) - rank(b);
 }
 
+/** Najwyższy numer zamkniętej partii leżącej w folderze czatu. */
+async function lastBatchNumber(chatDir: string): Promise<number> {
+    let highest = 0;
+    for (const file of await listDir(chatDir)) {
+        const match = /^messages_(\d+)\.json$/.exec(file);
+        if (!match) continue;
+        const value = Number.parseInt(match[1]!, 10);
+        if (Number.isFinite(value)) highest = Math.max(highest, value);
+    }
+    return highest;
+}
+
+/** Czat z publicznego API biblioteki w kształcie, jakiego używa nadrabianie. */
+function targetFromChat(chat: BackfillChat, chatId: string | null): BackfillTarget {
+    return {
+        id: chatId,
+        name: chat.name?.trim() ?? '',
+        syncHistory: typeof chat.syncHistory === 'function' ? () => chat.syncHistory() : null,
+        fetchMessages: async (limit) => (await chat.fetchMessages({ limit })) as WaMessage[],
+    };
+}
+
 function containsCheckpoint(messages: readonly WaMessage[], checkpoint: SyncCheckpoint): boolean {
     return messages.some((message) => messageKey(message) === checkpoint.messageId);
 }
@@ -1750,12 +1848,6 @@ function oldestTimestamp(messages: readonly WaMessage[]): number {
     let oldest = Number.POSITIVE_INFINITY;
     for (const message of messages) oldest = Math.min(oldest, message.timestamp);
     return oldest;
-}
-
-function isAfterCheckpoint(message: WaMessage, checkpoint: SyncCheckpoint): boolean {
-    if (message.timestamp > checkpoint.timestamp) return true;
-    if (message.timestamp < checkpoint.timestamp) return false;
-    return messageKey(message) !== checkpoint.messageId;
 }
 
 function lastByTimestamp(messages: readonly ArchivedMessage[]): ArchivedMessage | null {

@@ -100,10 +100,18 @@ export class TauService {
             return;
         }
 
+        // Nazwa rozmowy, gdy już ją znamy - żeby zgłoszenie błędu u właściciela
+        // mówiło, którego polecenia dotyczy.
+        let label = '';
         try {
             let conversation: TauConversation;
             let question = command;
-            if (this.isSelfChat(chatId)) {
+
+            // Polecenie zadane w rozmowie z kimś wraca do tej samej rozmowy.
+            // Czat z samym sobą jest jedynym miejscem, w którym trzeba wskazać
+            // rozmowę z nazwy - i tam odpowiedź zostaje.
+            const inSelfChat = this.isSelfChat(chatId);
+            if (inSelfChat) {
                 const conversations = await this.availableConversations();
                 const target = resolveTargetedTauCommand(command, conversations);
                 if (target.status === 'ambiguous') {
@@ -129,11 +137,19 @@ export class TauService {
                 conversation = found;
             }
 
+            label = conversation.name;
             const answer = await this.answerForFolder(conversation.folder, question);
-            await this.safeSendOwner(`[TAU]\nRozmowa: ${conversation.name}\n\n${answer}`);
+            if (inSelfChat) {
+                await this.safeSendOwner(`[TAU]\nRozmowa: ${conversation.name}\n\n${answer}`);
+            } else {
+                await this.safeSendToChat(chatId, conversation.name, answer);
+            }
         } catch (error) {
             log.error('Błąd zapytania ?tau', error, { stage: 'tau command' });
-            await this.safeSendOwner(`[TAU]\nNie udało się uzyskać odpowiedzi: ${safeError(error)}`);
+            const where = label ? `Rozmowa: ${label}\n` : '';
+            await this.safeSendOwner(
+                `[TAU]\n${where}Nie udało się uzyskać odpowiedzi: ${safeError(error)}`,
+            );
         }
     }
 
@@ -182,20 +198,38 @@ export class TauService {
         return owner;
     }
 
-    private async sendOwner(text: string): Promise<void> {
+    private async send(chatId: string, text: string): Promise<void> {
         // Brak modelu wysłanej wiadomości nie znaczy, że nie poszła -
         // szczegóły przy sendText().
-        const sent = await sendText(this.client, this.ownerId(), text.slice(0, 55000));
+        const sent = await sendText(this.client, chatId, text.slice(0, 55000));
         this.provider.rememberGenerated(sent);
     }
 
     private async safeSendOwner(text: string): Promise<void> {
         try {
-            await this.sendOwner(text);
+            await this.send(this.ownerId(), text);
         } catch (error) {
             log.error('Nie udało się przekazać wyniku ?tau właścicielowi', error, {
                 stage: 'tau owner response',
             });
+        }
+    }
+
+    /**
+     * Odpowiedź trafia do rozmowy, w której padło polecenie. Gdyby wysyłka
+     * tam się nie udała, wynik i tak wraca do właściciela - lepiej to niż
+     * zgubiona odpowiedź po tym, jak kontekst już opuścił program.
+     */
+    private async safeSendToChat(chatId: string, name: string, answer: string): Promise<void> {
+        try {
+            await this.send(chatId, `[TAU]\n${answer}`);
+        } catch (error) {
+            log.error('Nie udało się odesłać odpowiedzi ?tau do rozmowy', error, {
+                stage: 'tau chat response',
+            });
+            await this.safeSendOwner(
+                `[TAU]\nRozmowa: ${name}\nNie udało się wysłać odpowiedzi w tej rozmowie.\n\n${answer}`,
+            );
         }
     }
 }

@@ -377,3 +377,248 @@ export function healthLine(health: StoreHealth): string {
     }
     return `✓ Dane wczytane: ${health.contacts} kontaktów, ${health.chats} czatów.`;
 }
+
+// ─────────────────────────────────────────────────────────────────────────
+//  Odczyt prosto ze Store, bez serializacji całych modeli
+// ─────────────────────────────────────────────────────────────────────────
+//
+// getChats(), getChatById() i getBroadcasts() z whatsapp-web.js przepuszczają
+// modele przez getChatModel()/serialize(). Wystarczy jeden wadliwy model -
+// najczęściej grupa, której nie da się dociągnąć metadanych - i całe
+// wywołanie kończy się zminifikowanym "r: r". Odrzucało to listę czatów
+// razem z nadrabianiem, więc po każdym offline zostawała dziura.
+//
+// Poniższe funkcje czytają dokładnie te same kolekcje, ale biorą z nich tylko
+// identyfikatory i wiadomości. Zwracają null, gdy strona jest niedostępna albo
+// oddała coś nieoczekiwanego - wtedy wywołujący wraca do publicznego API.
+
+/** Czat widziany przez stronę: tylko to, czego potrzebuje nadrabianie. */
+export interface RawChatSummary {
+    id: string;
+    name: string;
+}
+
+/** Lista czatów bez getChatModel(). */
+export async function listChatsRaw(client: WaClient): Promise<RawChatSummary[] | null> {
+    const page = client.pupPage;
+    if (!page || typeof page.evaluate !== 'function') return null;
+
+    try {
+        const chats = await page.evaluate((): unknown => {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const root = globalThis as any;
+            const win = root.window ?? root;
+            let collection = win.Store?.Chat;
+            if (!collection?.getModelsArray && typeof win.require === 'function') {
+                try {
+                    collection = win.require('WAWebCollections')?.Chat;
+                } catch {
+                    collection = undefined;
+                }
+            }
+            if (!collection?.getModelsArray) return null;
+
+            return collection.getModelsArray().map((chat: any) => {
+                const id = chat?.id?._serialized;
+                if (typeof id !== 'string' || id.length === 0) return null;
+                try {
+                    // formattedTitle bywa getterem liczonym z kontaktu - gdyby
+                    // rzucił, czat i tak ma zostać na liście, tylko bez nazwy.
+                    const name = chat.formattedTitle ?? chat.name ?? chat.contact?.name ?? '';
+                    return { id, name: typeof name === 'string' ? name : '' };
+                } catch {
+                    return { id, name: '' };
+                }
+            });
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+        });
+        return chatSummaries(chats);
+    } catch (err) {
+        log.quiet(err, { stage: 'surowa lista czatów' });
+        return null;
+    }
+}
+
+/**
+ * Wszystkie konta WhatsAppa z książki adresowej tej sesji. Świeża instalacja
+ * nie ma jeszcze żadnego czatu w Store, więc bez tego pełne nadrabianie nie
+ * miałoby skąd wziąć rozmów z osobami, do których dawno nikt nie pisał.
+ */
+export async function listContactChatIds(client: WaClient): Promise<string[] | null> {
+    const page = client.pupPage;
+    if (!page || typeof page.evaluate !== 'function') return null;
+
+    try {
+        const ids = await page.evaluate((): unknown => {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const root = globalThis as any;
+            const win = root.window ?? root;
+            let collection = win.Store?.Contact;
+            if (!collection?.getModelsArray && typeof win.require === 'function') {
+                try {
+                    collection = win.require('WAWebCollections')?.Contact;
+                } catch {
+                    collection = undefined;
+                }
+            }
+            if (!collection?.getModelsArray) return null;
+
+            return collection.getModelsArray().map((contact: any) => {
+                try {
+                    // Dla kontaktu @lid numer telefonu jest lepszym kluczem -
+                    // WhatsApp oddaje dla niego komplet danych częściej.
+                    const id = contact?.phoneNumber?._serialized ?? contact?.id?._serialized;
+                    return typeof id === 'string' ? id : null;
+                } catch {
+                    return null;
+                }
+            });
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+        });
+        return contactIds(ids);
+    } catch (err) {
+        log.quiet(err, { stage: 'surowa lista kontaktów' });
+        return null;
+    }
+}
+
+/**
+ * Odpowiednik Chat.fetchMessages(), ale bez obiektu Chat - a więc i bez
+ * serializacji, która wywraca całe nadrabianie. Kroki są dokładnie te same,
+ * których używa whatsapp-web.js 1.34.6.
+ */
+export async function fetchMessagesRaw(
+    client: WaClient,
+    chatId: string,
+    limit: number,
+): Promise<WaMessage[] | null> {
+    const page = client.pupPage;
+    if (!page || typeof page.evaluate !== 'function') return null;
+    if (!Number.isFinite(limit) || limit <= 0) return null;
+
+    let models: unknown;
+    try {
+        models = await page.evaluate(
+            async (id: string, count: number): Promise<unknown> => {
+                /* eslint-disable @typescript-eslint/no-explicit-any */
+                const root = globalThis as any;
+                const win = root.window ?? root;
+                if (!win.WWebJS?.getChat || !win.WWebJS?.getMessageModel) return null;
+                if (!win.Store?.ConversationMsgs?.loadEarlierMsgs) return null;
+
+                const chat = await win.WWebJS.getChat(id, { getAsModel: false });
+                if (!chat?.msgs?.getModelsArray) return null;
+
+                const keep = (message: any): boolean => !message?.isNotification;
+                let msgs = chat.msgs.getModelsArray().filter(keep);
+                while (msgs.length < count) {
+                    const loaded = await win.Store.ConversationMsgs.loadEarlierMsgs(
+                        chat,
+                        chat.msgs,
+                    );
+                    if (!loaded?.length) break;
+                    msgs = [...loaded.filter(keep), ...msgs];
+                }
+
+                msgs.sort((a: any, b: any) => Number(a?.t ?? 0) - Number(b?.t ?? 0));
+                if (msgs.length > count) msgs = msgs.slice(msgs.length - count);
+                return msgs.map((message: any) => win.WWebJS.getMessageModel(message));
+                /* eslint-enable @typescript-eslint/no-explicit-any */
+            },
+            chatId,
+            Math.floor(limit),
+        );
+    } catch (err) {
+        log.quiet(err, { stage: 'surowy odczyt wiadomości', chat: chatId });
+        return null;
+    }
+
+    return toMessages(client, models);
+}
+
+/**
+ * Relacje prosto z kolekcji Store.Status. getBroadcasts() składa je z
+ * status.serialize(), a to w nowszych wydaniach WhatsApp Weba potrafi oddać
+ * model bez pola msgs - przegląd nie miał wtedy czego dopisywać.
+ */
+export async function listStatusMessages(client: WaClient): Promise<WaMessage[] | null> {
+    const page = client.pupPage;
+    if (!page || typeof page.evaluate !== 'function') return null;
+
+    let models: unknown;
+    try {
+        models = await page.evaluate((): unknown => {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const root = globalThis as any;
+            const win = root.window ?? root;
+            if (!win.WWebJS?.getMessageModel) return null;
+
+            let collection = win.Store?.Status;
+            if (!collection?.getModelsArray && typeof win.require === 'function') {
+                try {
+                    collection = win.require('WAWebCollections')?.Status;
+                } catch {
+                    collection = undefined;
+                }
+            }
+            if (!collection?.getModelsArray) return null;
+
+            const result: unknown[] = [];
+            for (const status of collection.getModelsArray()) {
+                try {
+                    const msgs = status?.msgs?.getModelsArray?.() ?? [];
+                    for (const message of msgs) {
+                        if (!message || message.isNotification) continue;
+                        result.push(win.WWebJS.getMessageModel(message));
+                    }
+                } catch {
+                    // Jedna wadliwa relacja nie może zabrać pozostałych.
+                }
+            }
+            return result;
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+        });
+    } catch (err) {
+        log.quiet(err, { stage: 'surowy odczyt relacji' });
+        return null;
+    }
+
+    return toMessages(client, models);
+}
+
+function chatSummaries(value: unknown): RawChatSummary[] | null {
+    if (!Array.isArray(value)) return null;
+
+    const seen = new Set<string>();
+    const result: RawChatSummary[] = [];
+    for (const item of value) {
+        if (!item || typeof item !== 'object') continue;
+        const { id, name } = item as { id?: unknown; name?: unknown };
+        if (typeof id !== 'string' || id.length === 0 || seen.has(id)) continue;
+        seen.add(id);
+        result.push({ id, name: typeof name === 'string' ? name : '' });
+    }
+    // Pusta lista to nie jest odpowiedź, na której da się polegać - lepiej
+    // spróbować publicznego API niż uznać, że nie ma żadnych czatów.
+    return result.length > 0 ? result : null;
+}
+
+function contactIds(value: unknown): string[] | null {
+    if (!Array.isArray(value)) return null;
+
+    const result = new Set<string>();
+    for (const item of value) {
+        if (typeof item !== 'string') continue;
+        if (!/@(c\.us|lid)$/.test(item)) continue;
+        result.add(item);
+    }
+    return result.size > 0 ? [...result] : null;
+}
+
+/** Modele ze strony na obiekty Message tej samej klasy, co reszta programu. */
+function toMessages(client: WaClient, models: unknown): WaMessage[] | null {
+    if (!Array.isArray(models)) return null;
+    return models
+        .filter((model): model is object => Boolean(model) && typeof model === 'object')
+        .map((model) => new HistoryMessage(client, model));
+}

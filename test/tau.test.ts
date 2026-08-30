@@ -207,7 +207,7 @@ test('provider ?tau można wznowić po ponownym sparowaniu WhatsAppa', async () 
     provider.stop();
 });
 
-test('?tau wykonuje tylko polecenie właściciela i nigdy nie wysyła odpowiedzi rozmówcy', async () => {
+test('?tau odpowiada w tej rozmowie, w której padło polecenie', async () => {
     await withTempDir(async (dir) => {
         await writeConversation(dir, '111111111@c.us', 'Albert', 'Albert');
         const sent: Array<{ to: string; body: string }> = [];
@@ -248,8 +248,38 @@ test('?tau wykonuje tylko polecenie właściciela i nigdy nie wysyła odpowiedzi
         await service.acceptIncoming(providerMessage(`${marker}\nTo jest podsumowanie.`));
         await handling;
 
-        assert.deepEqual(sent.map((item) => item.to), ['18002428478@c.us', '999999999@c.us']);
-        assert.ok(!sent.some((item) => item.to === '111111111@c.us'));
+        // Kontekst idzie tylko do providera, a gotowa odpowiedź wraca tam,
+        // gdzie padło polecenie - nie do czatu z samym sobą.
+        assert.deepEqual(sent.map((item) => item.to), ['18002428478@c.us', '111111111@c.us']);
+        assert.equal(sent[1]!.body, '[TAU]\nTo jest podsumowanie.');
+        assert.ok(!sent.some((item) => item.to === '999999999@c.us'));
+        await service.stop();
+    });
+});
+
+test('?tau zgłasza błąd do czatu z samym sobą, a nie rozmówcy', async () => {
+    await withTempDir(async (dir) => {
+        // Rozmowy nie ma w archiwum - polecenie nie ma z czego odpowiedzieć.
+        const sent: Array<{ to: string; body: string }> = [];
+        const service = new TauService(
+            testConfig(dir, { tauEnabled: true }),
+            serviceClient(sent),
+            { pendingMessagesFor: () => null } as never,
+        );
+        await service.start();
+
+        const owner = fakeMessage({
+            id: 'owner',
+            from: '111111111@c.us',
+            to: '111111111@c.us',
+            fromMe: true,
+            body: '?tau podsumuj',
+        });
+        (owner.id as { fromMe?: boolean }).fromMe = true;
+        await service.acceptOutgoing(owner);
+
+        assert.deepEqual(sent.map((item) => item.to), ['999999999@c.us']);
+        assert.ok(sent[0]!.body.includes('Nie znaleziono lokalnego archiwum'));
         await service.stop();
     });
 });
@@ -291,10 +321,10 @@ test('?tau dochodzi do końca, gdy WhatsApp nie oddaje modelu wysłanej wiadomo�
         await service.acceptIncoming(providerMessage(`${marker}\nTo jest podsumowanie.`));
         await handling;
 
-        const toOwner = sent.filter((item) => item.to === '999999999@c.us');
-        assert.equal(toOwner.length, 1, 'właściciel dostał dokładnie jedną wiadomość');
-        assert.ok(toOwner[0]!.body.includes('To jest podsumowanie.'));
-        assert.ok(!toOwner[0]!.body.includes('nie potwierdził'));
+        const answers = sent.filter((item) => item.to === '111111111@c.us');
+        assert.equal(answers.length, 1, 'rozmowa dostała dokładnie jedną odpowiedź');
+        assert.ok(answers[0]!.body.includes('To jest podsumowanie.'));
+        assert.ok(!answers[0]!.body.includes('nie potwierdził'));
         await service.stop();
     });
 });

@@ -271,7 +271,15 @@ class Runtime {
 
         await this.tryUnlockLockedChats();
 
-        const backfill = await this.backfillMessages(this.backfillAll);
+        // Świeża instalacja: w logach nie ma jeszcze ani jednej rozmowy.
+        // Pierwszy przebieg bierze wtedy wszystko, co WhatsApp Web udostępnia,
+        // razem z rozmowami sprzed czasów, gdy ten program w ogóle istniał.
+        const firstRun = !this.backfillAll && this.archive.isEmpty;
+        if (firstRun) {
+            log.info('Archiwum jest puste - pierwsze uruchomienie nadrabia całą dostępną historię.');
+        }
+
+        const backfill = await this.backfillMessages(this.backfillAll || firstRun);
 
         if (this.backfillAll) {
             const failed =

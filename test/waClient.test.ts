@@ -6,8 +6,12 @@ import { log } from '../src/log';
 import {
     checkStore,
     clearFullHistoryScan,
+    fetchMessagesRaw,
     findChrome,
     healthLine,
+    listChatsRaw,
+    listContactChatIds,
+    listStatusMessages,
     prepareFullHistoryScan,
     readFullHistoryBatch,
     waitForContacts,
@@ -293,4 +297,200 @@ test('wskazanie nieistniejącej przeglądarki nie kończy się jej użyciem', ()
 
     // Albo znaleziona systemowa, albo nic - byle nie ścieżka, której nie ma.
     assert.notEqual(found, path.join('nie', 'ma', 'takiego', 'chrome.exe'));
+});
+
+// ── Odczyt prosto ze Store ───────────────────────────────────────────────
+//
+// Te testy wykonują kod, który normalnie leci do Chromium. Nie sprawdzą, czy
+// WhatsApp Web faktycznie ma dziś taką kolekcję - to da się zobaczyć tylko na
+// żywej sesji. Sprawdzają natomiast całą logikę, która wcześniej istniała
+// wyłącznie w przeglądarce i była poza zasięgiem testów.
+
+/**
+ * Udawana strona. evaluate() wykonuje wstrzykiwaną funkcję na miejscu, a wynik
+ * przepuszcza przez JSON - dokładnie tak, jak robi to puppeteer. Dzięki temu
+ * test wyłapie również wartość, której nie da się przenieść ze strony do Node.
+ */
+async function withFakeWindow<T>(win: unknown, run: (client: WaClient) => Promise<T>): Promise<T> {
+    const target = globalThis as unknown as Record<string, unknown>;
+    const saved = target.window;
+    target.window = win;
+
+    const client = {
+        pupPage: {
+            async evaluate<R>(fn: (...args: never[]) => R, ...args: unknown[]): Promise<R> {
+                const value = await (fn as (...a: unknown[]) => R)(...args);
+                return (value === undefined ? undefined : JSON.parse(JSON.stringify(value))) as R;
+            },
+        },
+    } as unknown as WaClient;
+
+    try {
+        return await run(client);
+    } finally {
+        if (saved === undefined) delete target.window;
+        else target.window = saved;
+    }
+}
+
+/** Model wiadomości w kształcie, jaki oddaje WWebJS.getMessageModel(). */
+function rawModel(id: string, timestamp: number, chatId: string): Record<string, unknown> {
+    return {
+        id: { _serialized: id, id, remote: chatId, fromMe: false },
+        t: timestamp,
+        from: chatId,
+        to: 'me@c.us',
+        type: 'chat',
+        body: id,
+    };
+}
+
+test('surowa lista czatów pomija wadliwy model, zamiast paść razem z nim', async () => {
+    // Dokładnie ta sytuacja, w której getChats() kończy się błędem "r: r":
+    // jednego czatu nie da się opisać, a lista ma mimo to dojść do końca.
+    const chats: unknown[] = [
+        { id: { _serialized: '5550100@c.us' }, formattedTitle: 'Albert' },
+        {
+            id: { _serialized: 'grupa@g.us' },
+            get formattedTitle(): string {
+                throw new Error('r: r');
+            },
+        },
+        { id: null, formattedTitle: 'bez identyfikatora' },
+        { id: { _serialized: '5550100@c.us' }, formattedTitle: 'ten sam czat drugi raz' },
+    ];
+
+    const result = await withFakeWindow(
+        { Store: { Chat: { getModelsArray: () => chats } } },
+        (client) => listChatsRaw(client),
+    );
+
+    assert.deepEqual(result, [
+        { id: '5550100@c.us', name: 'Albert' },
+        { id: 'grupa@g.us', name: '' },
+    ]);
+});
+
+test('brak Store.Chat nie kończy listy czatów - zostaje moduł WhatsApp Weba', async () => {
+    const result = await withFakeWindow(
+        {
+            require: (name: string): unknown => {
+                if (name !== 'WAWebCollections') throw new Error(`brak modułu ${name}`);
+                return {
+                    Chat: {
+                        getModelsArray: () => [{ id: { _serialized: '5550100@c.us' }, name: 'Albert' }],
+                    },
+                };
+            },
+        },
+        (client) => listChatsRaw(client),
+    );
+
+    assert.deepEqual(result, [{ id: '5550100@c.us', name: 'Albert' }]);
+});
+
+test('pusta kolekcja czatów nie udaje odpowiedzi, na której da się polegać', async () => {
+    const result = await withFakeWindow(
+        { Store: { Chat: { getModelsArray: () => [] } } },
+        (client) => listChatsRaw(client),
+    );
+
+    // null, a nie [] - inaczej nadrabianie uznałoby, że nie ma żadnych rozmów,
+    // zamiast sięgnąć po publiczne API.
+    assert.equal(result, null);
+});
+
+test('kontakty do pełnego nadrabiania biorą numer telefonu przed @lid', async () => {
+    const contacts: unknown[] = [
+        { id: { _serialized: '111@lid' }, phoneNumber: { _serialized: '5550100@c.us' } },
+        { id: { _serialized: '5550200@c.us' } },
+        { id: { _serialized: '222@lid' } },
+        { id: { _serialized: 'status@broadcast' } },
+        { id: { _serialized: 'grupa@g.us' } },
+        { id: null },
+    ];
+
+    const result = await withFakeWindow(
+        { Store: { Contact: { getModelsArray: () => contacts } } },
+        (client) => listContactChatIds(client),
+    );
+
+    assert.deepEqual(result, ['5550100@c.us', '5550200@c.us', '222@lid']);
+});
+
+test('surowy odczyt wiadomości pogłębia historię i oddaje ostatnie po czasie', async () => {
+    const chatId = '5550100@c.us';
+    const powiadomienie = { ...rawModel('powiadomienie', 25, chatId), isNotification: true };
+    const msgs: unknown[] = [rawModel('n3', 30, chatId), powiadomienie];
+    let loads = 0;
+
+    const result = await withFakeWindow(
+        {
+            Store: {
+                ConversationMsgs: {
+                    async loadEarlierMsgs(): Promise<unknown[]> {
+                        loads++;
+                        if (loads > 1) return [];
+                        return [rawModel('n1', 10, chatId), rawModel('n2', 20, chatId)];
+                    },
+                },
+            },
+            WWebJS: {
+                async getChat() {
+                    return { msgs: { getModelsArray: () => msgs } };
+                },
+                getMessageModel: (message: unknown) => message,
+            },
+        },
+        (client) => fetchMessagesRaw(client, chatId, 2),
+    );
+
+    assert.deepEqual(result?.map((message) => messageKey(message)), ['n2', 'n3']);
+    assert.equal(loads, 1, 'po osiągnięciu limitu nie schodzimy głębiej');
+});
+
+test('brak WWebJS oddaje null, żeby nadrabianie wróciło do publicznego API', async () => {
+    const result = await withFakeWindow({ Store: {} }, (client) =>
+        fetchMessagesRaw(client, '5550100@c.us', 25),
+    );
+
+    assert.equal(result, null);
+});
+
+test('relacje czytamy wprost z kolekcji, a jedna wadliwa nie zabiera reszty', async () => {
+    const status = (author: string, id: string, timestamp: number): unknown => ({
+        msgs: {
+            getModelsArray: () => [
+                {
+                    ...rawModel(id, timestamp, author),
+                    id: { _serialized: id, id, remote: 'status@broadcast', participant: author },
+                    to: 'status@broadcast',
+                    isStatusV3: true,
+                },
+            ],
+        },
+    });
+    const wadliwa: unknown = {
+        get msgs(): unknown {
+            throw new Error('r: r');
+        },
+    };
+
+    const result = await withFakeWindow(
+        {
+            Store: {
+                Status: {
+                    getModelsArray: () => [
+                        status('999@lid', 'relacja-1', 10),
+                        wadliwa,
+                        status('888@lid', 'relacja-2', 20),
+                    ],
+                },
+            },
+            WWebJS: { getMessageModel: (message: unknown) => message },
+        },
+        (client) => listStatusMessages(client),
+    );
+
+    assert.deepEqual(result?.map((message) => messageKey(message)), ['relacja-1', 'relacja-2']);
 });

@@ -402,8 +402,19 @@ test('nadrabianie rozwija czaty pojedynczo, gdy zbiorcze getChats jest uszkodzon
         let getChatsCalls = 0;
         let getChatByIdCalls = 0;
 
+        // Pierwsze zapytanie do strony oddaje samą listę czatów. Kolejne -
+        // kontakty i surowy odczyt wiadomości - udają wydanie WhatsApp Weba,
+        // z którego nie da się czytać wprost, więc zostaje publiczne API.
+        let evaluateCalls = 0;
         client.pupPage = {
-            evaluate: async () => ['999@lid', 'wadliwy@g.us'],
+            evaluate: async () => {
+                evaluateCalls++;
+                if (evaluateCalls > 1) return null;
+                return [
+                    { id: '999@lid', name: '' },
+                    { id: 'wadliwy@g.us', name: 'Wadliwa grupa' },
+                ];
+            },
         } as unknown as NonNullable<typeof client.pupPage>;
         client.getChats = async () => {
             getChatsCalls++;
@@ -422,7 +433,7 @@ test('nadrabianie rozwija czaty pojedynczo, gdy zbiorcze getChats jest uszkodzon
         assert.deepEqual(
             await archive.backfillRecent(25, { includeNewChats: true }),
             {
-                chats: 1,
+                chats: 2,
                 skippedNewChats: 0,
                 listingFailed: false,
                 scanned: 1,
@@ -755,5 +766,102 @@ test('spis czatów zapamiętuje, gdzie leży archiwum danej osoby', async () => 
 
         assert.equal(index['5550100@c.us']?.safeName, '5550100');
         assert.equal(index['999@lid']?.safeName, '5550100', 'wpis jest też pod @lid');
+    });
+});
+
+test('relacja skasowana z archiwum wraca przy kolejnym przeglądzie', async () => {
+    await withTempDir(async (dir) => {
+        const relacja = fakeMessage({
+            id: 'relacja-1',
+            from: 'status@broadcast',
+            author: '999@lid',
+            isStatus: true,
+            body: 'storka',
+        });
+        const client = fakeClient({
+            lidToPhone: { '999@lid': '5550100@c.us' },
+            broadcasts: [{ msgs: [relacja] }],
+        });
+
+        const archive = new Archive(testConfig(dir), client);
+        assert.deepEqual(await archive.sweepStatuses(), { saved: 1, skipped: 0 });
+
+        // Skasowanie relacji z archiwum ma znaczyć "pobierz ją jeszcze raz".
+        // Wcześniej pamięć identyfikatorów mówiła "już mam" nawet wtedy, gdy
+        // folderu dawno nie było, i relacja nie wracała już nigdy.
+        await fs.rm(path.join(dir, 'Statusy'), { recursive: true, force: true });
+        assert.deepEqual(await archive.sweepStatuses(), { saved: 1, skipped: 0 });
+
+        const state = await readState(dir, path.join('Statusy', '5550100'));
+        assert.equal(state.pendingMessages.length, 1);
+    });
+});
+
+test('nadrabianie zapisuje wiadomość starszą niż ostatnia zapisana', async () => {
+    await withTempDir(async (dir) => {
+        const nowsza = fakeMessage({ id: 'nowsza', from: '999@lid', body: 'ostatnia', timestamp: 20 });
+        // WhatsApp potrafi dosłać wiadomość z czasu przestoju z jej własną,
+        // starszą datą. Odcinanie po znaczniku czasu gubiło ją na zawsze.
+        const spoznona = fakeMessage({ id: 'spozniona', from: '999@lid', body: 'z przestoju', timestamp: 15 });
+
+        const client = fakeClient({ lidToPhone: { '999@lid': '5550100@c.us' } });
+        client.getChats = async () =>
+            [
+                {
+                    id: { _serialized: '999@lid' },
+                    fetchMessages: async () => [spoznona, nowsza],
+                },
+            ] as unknown as Awaited<ReturnType<typeof client.getChats>>;
+
+        const archive = new Archive(testConfig(dir, { messagesPerFile: 100 }), client);
+        await archive.save(nowsza);
+        await archive.backfillRecent(25);
+
+        const stats = await archive.backfillRecent(25);
+        assert.equal(stats.saved, 0, 'drugi przebieg nie dubluje niczego');
+
+        const state = await readState(dir, '5550100');
+        assert.deepEqual(
+            state.pendingMessages.map((message) => message.body),
+            ['ostatnia', 'z przestoju'],
+        );
+    });
+});
+
+test('nadrabianie bierze listę czatów ze strony, bez zbiorczego getChats', async () => {
+    await withTempDir(async (dir) => {
+        const message = fakeMessage({ id: 'historyczna', from: '999@lid', body: 'sprzed instalacji' });
+        const client = fakeClient({ lidToPhone: { '999@lid': '5550100@c.us' } });
+
+        let getChatsCalls = 0;
+        client.getChats = async () => {
+            getChatsCalls++;
+            throw new Error('r: r');
+        };
+
+        // Świeża instalacja: Store nie ma jeszcze czatu, jest za to kontakt.
+        const evaluated: unknown[] = [];
+        client.pupPage = {
+            evaluate: async () => {
+                evaluated.push(null);
+                if (evaluated.length === 1) return [];
+                if (evaluated.length === 2) return ['5550100@c.us'];
+                return null;
+            },
+        } as unknown as NonNullable<typeof client.pupPage>;
+        client.getChatById = async (id: string) =>
+            ({
+                id: { _serialized: id },
+                fetchMessages: async () => [message],
+            }) as unknown as Awaited<ReturnType<typeof client.getChatById>>;
+
+        const archive = new Archive(testConfig(dir), client);
+        assert.equal(archive.isEmpty, true, 'puste archiwum poznajemy przed startem');
+
+        const stats = await archive.backfillRecent(25, { includeNewChats: true });
+        assert.equal(stats.saved, 1);
+        assert.equal(getChatsCalls, 0, 'kontakty wystarczyły, zbiorcze getChats nie było potrzebne');
+        assert.deepEqual(await listFiles(dir), ['5550100', '_czaty.json']);
+        assert.equal(archive.isEmpty, false);
     });
 });
