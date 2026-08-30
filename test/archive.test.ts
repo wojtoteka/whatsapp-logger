@@ -280,6 +280,51 @@ test('nadrabianie przegląda poprzednie czaty i dopisuje tylko brakujące wiadom
     });
 });
 
+test('nadrabianie nie odpuszcza, gdy WhatsApp nie oddaje listy czatów', async () => {
+    await withTempDir(async (dir) => {
+        const old = fakeMessage({ id: 'stara', from: '999@lid', body: 'już mam', timestamp: 10 });
+        const missing = fakeMessage({
+            id: 'brakująca',
+            from: '999@lid',
+            body: 'z czasu przestoju',
+            timestamp: 20,
+        });
+        const opened: string[] = [];
+        const client = fakeClient({ lidToPhone: { '999@lid': '5550100@c.us' } });
+        // Dokładnie ta awaria, która po każdym offline zostawiała dziurę:
+        // jeden wadliwy model odrzuca całą listę czatów.
+        client.getChats = async () => {
+            throw new Error('r: r');
+        };
+        client.getChatById = (async (chatId: string) => {
+            opened.push(chatId);
+            return {
+                id: { _serialized: chatId },
+                fetchMessages: async () => [missing, old],
+            };
+        }) as unknown as typeof client.getChatById;
+
+        const archive = new Archive(testConfig(dir, { messagesPerFile: 100 }), client);
+        await archive.save(old);
+
+        const stats = await archive.backfillRecent(25);
+        assert.equal(stats.listingFailed, false, 'spis archiwum wystarczył za listę czatów');
+        assert.equal(stats.saved, 1);
+        assert.equal(stats.skipped, 1);
+        assert.equal(stats.complete, false, 'zakres jest jawnie oznaczony jako niepełny');
+
+        // Numer i @lid prowadzą do tego samego folderu - czat otwieramy raz,
+        // zaczynając od numeru.
+        assert.deepEqual(opened, ['5550100@c.us']);
+
+        const state = await readState(dir, '5550100');
+        assert.deepEqual(
+            state.pendingMessages.map((message) => message.body),
+            ['już mam', 'z czasu przestoju'],
+        );
+    });
+});
+
 test('zwykłe nadrabianie pomija czat bez folderu, a jawny tryb może go założyć', async () => {
     await withTempDir(async (dir) => {
         const message = fakeMessage({

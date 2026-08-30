@@ -351,7 +351,8 @@ Hook jest dodatkowym zabezpieczeniem, a nie zamiennikiem sprawdzenia zmian przed
 | Sesja straciła autoryzację | Przy `LOGOUT` poczekaj na QR w tym samym terminalu. Ręcznie usuń `.wwebjs_auth` tylko wtedy, gdy starsza wersja programu zostawiła niedokończoną sesję. |
 | Folder czatu ma nazwę złożoną z cyfr | Poczekaj na synchronizację kontaktów; po znalezieniu lepszej nazwy logger potrafi przenieść archiwum. |
 | Pojawia się komunikat o częściowych danych WhatsApp Web | Zaktualizuj `whatsapp-web.js` i ponownie przetestuj aplikację. |
-| Zbiorcze pobranie czatów kończy się krótkim błędem `r: r` | Logger próbuje rozwinąć czaty pojedynczo, dzięki czemu jeden wadliwy model nie blokuje całego nadrabiania. Liczba pominiętych czatów pojawi się w podsumowaniu. |
+| Zbiorcze pobranie czatów kończy się krótkim błędem `r: r` | Logger próbuje rozwinąć czaty pojedynczo, dzięki czemu jeden wadliwy model nie blokuje całego nadrabiania. Gdy WhatsApp nie odda listy czatów w ogóle, nadrabianie idzie po rozmowach ze spisu `logs/_czaty.json` i oznacza zakres jako niepełny. Liczba pominiętych czatów pojawi się w podsumowaniu. |
+| W archiwum jest notatka „nie udało się pobrać pliku" | Pobranie jest ponawiane, bo WhatsApp Web oddaje pustkę również w trakcie ściągania. Pliku z relacji sprzed doby albo z wygasłego załącznika nie odzyska już nikt - notatka zostaje w archiwum wraz z typem i rozmiarem. |
 | Zabezpieczony czat nie został odsłonięty | Nowe wiadomości nadal są zapisywane; WhatsApp Web może jedynie nie udostępnić wcześniejszej historii. |
 | Panel nie startuje | Uruchom `npm run panel:build`, a potem ponownie `npm start`. |
 | Panel pokazuje błąd konfiguracji | Sprawdź `AUTH_SECRET` w `panel/.env`. |

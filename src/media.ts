@@ -10,7 +10,24 @@ import type { Config } from './config';
 import { messageHash, messageKey } from './identity';
 import { log } from './log';
 import type { DownloadedMedia, SkippedMedia, WaMessage } from './types';
-import { ensureDir } from './util';
+import { ensureDir, sleep } from './util';
+
+/**
+ * Odstępy przed kolejnymi podejściami do jednego pliku.
+ *
+ * WhatsApp Web zwraca pusty wynik również wtedy, gdy pobieranie dopiero
+ * ruszyło (mediaStage "FETCHING") - biblioteka nie czeka na jego koniec.
+ * Jedno podejście gubiło z tego powodu zdjęcia i relacje, które chwilę
+ * później były już gotowe.
+ */
+const RETRY_WAITS_MS = [0, 1200, 3000] as const;
+
+/**
+ * Ile plików w jednym czacie wolno ponawiać w czasie jednego przebiegu.
+ * Stara historia bywa nie do odzyskania i nie ma sensu dokładać do niej
+ * kilku sekund na każdą wiadomość.
+ */
+const RETRIED_FAILURES_PER_CHAT = 5;
 
 export interface MediaTarget {
     /** Folder, do którego trafiają pliki tego czatu. */
@@ -36,8 +53,18 @@ const NOTHING: MediaResult = { path: null, name: null, skipped: null };
 export class MediaDownloader {
     /** Czaty, w których pobieranie już raz padło - komunikat leci raz. */
     private readonly failedChats = new Set<string>();
+    /** Ile plików w danym czacie ponawialiśmy bez skutku. */
+    private readonly retriedFailures = new Map<string, number>();
 
     constructor(private readonly config: Config) {}
+
+    private retriesLeft(target: MediaTarget): number {
+        return RETRIED_FAILURES_PER_CHAT - (this.retriedFailures.get(target.label) ?? 0);
+    }
+
+    private countRetriedFailure(target: MediaTarget): void {
+        this.retriedFailures.set(target.label, (this.retriedFailures.get(target.label) ?? 0) + 1);
+    }
 
     /**
      * Pobiera i zapisuje plik z wiadomości. Zawsze zwraca wynik - błąd
@@ -107,38 +134,53 @@ export class MediaDownloader {
     }
 
     /**
-     * Pobranie z jedną powtórką. Relacje z przeglądu bywa, że w chwili
-     * pobierania nie ma jeszcze w pamięci przeglądarki - wtedy szukamy ich
-     * w kolekcji statusów, a na końcu odświeżamy samą wiadomość.
+     * Pobranie z powtórkami. Pusty wynik nie znaczy jeszcze, że pliku nie ma:
+     * WhatsApp Web często dopiero go ściąga. Relacje z przeglądu bywa, że nie
+     * ma w pamięci przeglądarki wśród zwykłych wiadomości - wtedy szukamy ich
+     * w kolekcji statusów, a między podejściami odświeżamy samą wiadomość.
      */
     private async fetch(message: WaMessage, target: MediaTarget): Promise<DownloadedMedia | null> {
         let firstError: unknown = null;
 
-        try {
-            const media = (await message.downloadMedia()) as DownloadedMedia | null;
-            if (media?.data) return media;
-        } catch (err) {
-            firstError = err;
-        }
-
-        if (target.isStatus) {
+        const tryOnce = async (
+            load: () => Promise<DownloadedMedia | null>,
+        ): Promise<DownloadedMedia | null> => {
             try {
-                const media = await downloadStatusMedia(message);
-                if (media?.data) return media;
+                const media = await load();
+                return media?.data ? media : null;
             } catch (err) {
                 firstError ??= err;
+                return null;
+            }
+        };
+
+        const waits = this.retriesLeft(target) > 0 ? RETRY_WAITS_MS : RETRY_WAITS_MS.slice(0, 1);
+
+        for (const [attempt, waitMs] of waits.entries()) {
+            if (waitMs > 0) await sleep(waitMs);
+
+            const direct = await tryOnce(
+                async () => (await message.downloadMedia()) as DownloadedMedia | null,
+            );
+            if (direct) return direct;
+
+            if (target.isStatus) {
+                const status = await tryOnce(() => downloadStatusMedia(message));
+                if (status) return status;
+            }
+
+            // Odświeżenie modelu kosztuje osobne zapytanie do strony, więc
+            // sięgamy po nie dopiero, gdy zwykłe pobranie zawiodło raz.
+            if (attempt > 0 && typeof message.reload === 'function') {
+                const fresh = await tryOnce(async () => {
+                    const reloaded = (await message.reload()) as WaMessage | null;
+                    return reloaded ? ((await reloaded.downloadMedia()) as DownloadedMedia | null) : null;
+                });
+                if (fresh) return fresh;
             }
         }
 
-        if (typeof message.reload === 'function') {
-            try {
-                const fresh = (await message.reload()) as WaMessage | null;
-                const media = fresh ? ((await fresh.downloadMedia()) as DownloadedMedia | null) : null;
-                if (media?.data) return media;
-            } catch (err) {
-                firstError ??= err;
-            }
-        }
+        if (waits.length > 1) this.countRetriedFailure(target);
 
         if (firstError && !this.failedChats.has(target.label)) {
             log.quiet(firstError, {

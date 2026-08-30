@@ -16,6 +16,30 @@ interface ActiveRequest {
     timer: NodeJS.Timeout;
 }
 
+/**
+ * Wysyła tekst i zwraca model wysłanej wiadomości, o ile WhatsApp go oddał.
+ *
+ * Brak modelu NIE jest awarią. Z waitUntilMsgSent:true whatsapp-web.js
+ * odczytuje model dopiero po potwierdzeniu wysyłki, przez
+ * Store.Msg.get(nowyKlucz). WhatsApp zdąży w tym czasie podmienić klucz
+ * wiadomości, więc odczyt trafia w pustkę i biblioteka zwraca undefined,
+ * mimo że wiadomość poszła. Traktowanie tego jako błędu gubiło każdą
+ * odpowiedź ?tau: request docierał do providera, a logger zdążył już
+ * odrzucić własne oczekiwanie. Awarię zgłasza dopiero odrzucone
+ * sendMessage().
+ */
+export async function sendText(
+    client: WaClient,
+    chatId: string,
+    text: string,
+): Promise<WaMessage | null> {
+    const sent = await client.sendMessage(chatId, text, {
+        sendSeen: false,
+        waitUntilMsgSent: true,
+    });
+    return (sent as WaMessage | null) ?? null;
+}
+
 export class WhatsAppTauProvider {
     private providerId: string | null = null;
     private active: ActiveRequest | null = null;
@@ -132,14 +156,9 @@ export class WhatsAppTauProvider {
             timer.unref?.();
 
             this.active = { marker: prompt.marker, providerId, resolve, reject, timer };
-            void this.client
-                .sendMessage(providerId, prompt.text, {
-                    sendSeen: false,
-                    waitUntilMsgSent: true,
-                })
+            void sendText(this.client, providerId, prompt.text)
                 .then((sent) => {
-                    if (!sent) throw new Error('WhatsApp nie potwierdził wysłania zapytania ?tau.');
-                    this.rememberGenerated(sent as WaMessage);
+                    this.rememberGenerated(sent);
                 })
                 .catch((error: unknown) => {
                     if (this.active?.marker !== prompt.marker) return;

@@ -510,13 +510,22 @@ export function generateHtml(options: HtmlOptions): string {
     --dim:#93A9AD;
     --sea:#3FB6A8;
     --edge:rgba(228,237,238,.10);
-    --serif:Georgia,'Iowan Old Style','Palatino Linotype','Book Antiqua',serif;
+    --serif:'Cyfry',Georgia,'Iowan Old Style','Palatino Linotype','Book Antiqua',serif;
     --sans:'Segoe UI','Noto Sans','Helvetica Neue',Arial,sans-serif;
     --mono:Consolas,'DejaVu Sans Mono','SFMono-Regular',Menlo,monospace;
 
     /* Kolory imion nadawców, stałe dla danej osoby */
     --n1:#6FD3C4; --n2:#8FBEE8; --n3:#F2B872;
     --n4:#A8D98A; --n5:#E8918A; --n6:#C4A5E0;
+}
+
+/* Georgia ma cyfry tekstowe - nazwa czatu będąca samym numerem wygląda
+   w niej jak rozsypana. Pod same cyfry podstawiamy krój bezszeryfowy. */
+@font-face{
+    font-family:'Cyfry';
+    src:local('Segoe UI'),local('Noto Sans'),local('DejaVu Sans'),
+        local('Helvetica Neue'),local('Arial'),local('Liberation Sans');
+    unicode-range:U+0030-0039,U+002B;
 }
 
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}

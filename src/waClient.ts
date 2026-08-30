@@ -223,8 +223,24 @@ export interface StoreHealth {
     error?: string | null;
 }
 
-/** Pola Store, bez których rozpoznawanie nazw i numerów nie ma szans. */
-const REQUIRED_STORE_KEYS = ['WidFactory', 'Contact', 'Chat', 'Msg', 'LidUtils'];
+/**
+ * Pola Store, bez których rozpoznawanie nazw i numerów nie ma szans, wraz
+ * z modułem WhatsApp Weba, z którego whatsapp-web.js je składa.
+ *
+ * Drugi adres nie jest ozdobnikiem. window.Store powstaje dopiero wtedy, gdy
+ * biblioteka zdąży wykonać własne wstrzyknięcie, a strona potrafi się w tym
+ * czasie przeładować i zabrać je ze sobą. Samo window.require działa wtedy
+ * dalej, bo należy do WhatsApp Weba, nie do biblioteki. Bez tej drugiej drogi
+ * start czekał pełne 90 sekund i szedł dalej z pustymi danymi, mimo że
+ * kolekcje były na wyciągnięcie ręki.
+ */
+const REQUIRED_STORE_KEYS: ReadonlyArray<[key: string, moduleName: string]> = [
+    ['WidFactory', 'WAWebWidFactory'],
+    ['Contact', 'WAWebCollections'],
+    ['Chat', 'WAWebCollections'],
+    ['Msg', 'WAWebCollections'],
+    ['LidUtils', 'WAWebApiContact'],
+];
 
 /** Sprawdza jednym zapytaniem, w jakim stanie jest strona WhatsApp Weba. */
 export async function checkStore(client: WaClient): Promise<StoreHealth> {
@@ -234,20 +250,40 @@ export async function checkStore(client: WaClient): Promise<StoreHealth> {
         complete: false,
         contacts: 0,
         chats: 0,
-        missing: [...REQUIRED_STORE_KEYS],
+        missing: REQUIRED_STORE_KEYS.map(([key]) => key),
     };
     if (!page || typeof page.evaluate !== 'function') return empty;
 
     try {
-        return await page.evaluate((keys: string[]): StoreHealth => {
+        return await page.evaluate((keys: ReadonlyArray<[string, string]>): StoreHealth => {
             /* eslint-disable @typescript-eslint/no-explicit-any */
             const root = globalThis as any;
-            const store = root.window?.Store ?? root.Store;
-            if (!store) {
-                return { store: false, complete: false, contacts: 0, chats: 0, missing: keys };
+            const win = root.window ?? root;
+            const store = win.Store;
+
+            // Moduł z WhatsApp Weba jako druga droga do tej samej kolekcji.
+            const modules = new Map<string, any>();
+            const fromModule = (key: string, moduleName: string): any => {
+                if (typeof win.require !== 'function') return undefined;
+                if (!modules.has(moduleName)) {
+                    try {
+                        modules.set(moduleName, win.require(moduleName));
+                    } catch {
+                        modules.set(moduleName, undefined);
+                    }
+                }
+                const loaded = modules.get(moduleName);
+                return loaded?.[key] ?? loaded;
+            };
+
+            const found = new Map<string, any>();
+            const missing: string[] = [];
+            for (const [key, moduleName] of keys) {
+                const value = store?.[key] ?? fromModule(key, moduleName);
+                if (value) found.set(key, value);
+                else missing.push(key);
             }
 
-            const missing = keys.filter((key) => !store[key]);
             const count = (collection: any): number => {
                 try {
                     return collection?.getModelsArray?.().length ?? 0;
@@ -257,10 +293,10 @@ export async function checkStore(client: WaClient): Promise<StoreHealth> {
             };
 
             return {
-                store: true,
+                store: found.size > 0,
                 complete: missing.length === 0,
-                contacts: count(store.Contact),
-                chats: count(store.Chat),
+                contacts: count(found.get('Contact')),
+                chats: count(found.get('Chat')),
                 missing,
             };
             /* eslint-enable @typescript-eslint/no-explicit-any */

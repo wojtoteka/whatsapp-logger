@@ -254,6 +254,51 @@ test('?tau wykonuje tylko polecenie właściciela i nigdy nie wysyła odpowiedzi
     });
 });
 
+test('?tau dochodzi do końca, gdy WhatsApp nie oddaje modelu wysłanej wiadomości', async () => {
+    await withTempDir(async (dir) => {
+        await writeConversation(dir, '111111111@c.us', 'Albert', 'Albert');
+        const sent: Array<{ to: string; body: string }> = [];
+        const client = {
+            ...serviceClient(sent),
+            // Tak zachowuje się whatsapp-web.js z waitUntilMsgSent:true, gdy
+            // WhatsApp zdąży podmienić klucz wiadomości: wysyłka się udała,
+            // ale Store.Msg.get() nie ma już czego zwrócić.
+            async sendMessage(to: string, body: unknown) {
+                sent.push({ to, body: String(body) });
+                return undefined;
+            },
+        } as unknown as WaClient;
+
+        const service = new TauService(
+            testConfig(dir, { tauEnabled: true }),
+            client,
+            { pendingMessagesFor: () => null } as never,
+        );
+        await service.start();
+
+        const owner = fakeMessage({
+            id: 'owner',
+            from: '111111111@c.us',
+            to: '111111111@c.us',
+            fromMe: true,
+            body: '?tau podsumuj',
+        });
+        (owner.id as { fromMe?: boolean }).fromMe = true;
+
+        const handling = service.acceptOutgoing(owner);
+        await waitUntil(() => sent.length === 1);
+        const marker = markerFrom(sent[0]!.body);
+        await service.acceptIncoming(providerMessage(`${marker}\nTo jest podsumowanie.`));
+        await handling;
+
+        const toOwner = sent.filter((item) => item.to === '999999999@c.us');
+        assert.equal(toOwner.length, 1, 'właściciel dostał dokładnie jedną wiadomość');
+        assert.ok(toOwner[0]!.body.includes('To jest podsumowanie.'));
+        assert.ok(!toOwner[0]!.body.includes('nie potwierdził'));
+        await service.stop();
+    });
+});
+
 function archived(id: string, timestamp: number, body: string, fromMe: boolean, type = 'chat') {
     return {
         id,

@@ -15,7 +15,7 @@ import {
 } from './tauContext';
 import type { TauConversation } from './tauContext';
 import { TauJobWorker } from './tauJobs';
-import { WhatsAppTauProvider } from './tauProvider';
+import { sendText, WhatsAppTauProvider } from './tauProvider';
 import type { WaClient, WaMessage } from './types';
 
 export class TauService {
@@ -183,12 +183,10 @@ export class TauService {
     }
 
     private async sendOwner(text: string): Promise<void> {
-        const sent = await this.client.sendMessage(this.ownerId(), text.slice(0, 55000), {
-            sendSeen: false,
-            waitUntilMsgSent: true,
-        });
-        if (!sent) throw new Error('WhatsApp nie potwierdził prywatnej wiadomości do właściciela.');
-        this.provider.rememberGenerated(sent as WaMessage);
+        // Brak modelu wysłanej wiadomości nie znaczy, że nie poszła -
+        // szczegóły przy sendText().
+        const sent = await sendText(this.client, this.ownerId(), text.slice(0, 55000));
+        this.provider.rememberGenerated(sent);
     }
 
     private async safeSendOwner(text: string): Promise<void> {

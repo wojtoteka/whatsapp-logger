@@ -42,6 +42,36 @@ function collection(size: number): { getModelsArray: () => unknown[] } {
     return { getModelsArray: () => new Array<unknown>(size).fill(null) };
 }
 
+/**
+ * Strona bez window.Store, ale z działającym window.require. Tak wygląda
+ * WhatsApp Web, zanim biblioteka zdąży wstrzyknąć własny Store albo gdy
+ * przeładowanie strony go zabrało.
+ */
+function pageWithModules(modules: Record<string, unknown>): WaClient {
+    return {
+        pupPage: {
+            async evaluate<T>(fn: (...args: never[]) => T, ...args: unknown[]): Promise<T> {
+                const target = globalThis as unknown as Record<string, unknown>;
+                const savedStore = target.Store;
+                const savedRequire = target.require;
+                delete target.Store;
+                target.require = (name: string): unknown => {
+                    if (!(name in modules)) throw new Error(`brak modułu ${name}`);
+                    return modules[name];
+                };
+                try {
+                    return await (fn as (...a: unknown[]) => T)(...args);
+                } finally {
+                    if (savedStore === undefined) delete target.Store;
+                    else target.Store = savedStore;
+                    if (savedRequire === undefined) delete target.require;
+                    else target.require = savedRequire;
+                }
+            },
+        },
+    } as unknown as WaClient;
+}
+
 test('pełna historia jest przekazywana z WhatsApp Store do Node w paczkach', async () => {
     const chatId = '5550100@c.us';
     const model = (id: string, timestamp: number) => ({
@@ -122,6 +152,24 @@ test('brak window.Store rozpoznajemy jako stronę, która nic jeszcze nie udost�
     // przy każdej wiadomości i przenosi foldery, gdy pozna lepszą.
     assert.match(healthLine(health), /Nie zajrzałem do danych/);
     assert.doesNotMatch(healthLine(health), /samymi cyframi/);
+});
+
+test('bez window.Store dane bierzemy wprost z modułów WhatsApp Weba', async () => {
+    // Inaczej start czekał pełne 90 sekund i szedł dalej z pustymi danymi,
+    // mimo że kolekcje były gotowe do odczytania.
+    const health = await checkStore(
+        pageWithModules({
+            WAWebCollections: { Contact: collection(120), Chat: collection(30), Msg: collection(0) },
+            WAWebWidFactory: { createWid: () => null },
+            WAWebApiContact: { getPhoneNumber: () => null },
+        }),
+    );
+
+    assert.equal(health.store, true);
+    assert.equal(health.complete, true);
+    assert.equal(health.contacts, 120);
+    assert.equal(health.chats, 30);
+    assert.deepEqual(health.missing, []);
 });
 
 test('niepełne wstrzyknięcie Store jest wykrywane i nazwane po imieniu', async () => {

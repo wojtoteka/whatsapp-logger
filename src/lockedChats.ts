@@ -195,9 +195,32 @@ async function runInPage(secret: string, moduleName: string): Promise<UnlockResu
         // czy w ogóle jest ustawiony. hasChatlockSecretCode() potrafi
         // odpowiedzieć "nie" jeszcze zanim dane się zsynchronizują, a wtedy
         // odbijaliśmy się od tego pytania, nie próbując nawet hasła.
-        // Funkcja bierze dwa argumenty: kod i kontekst zdarzenia
-        // telemetrycznego. Drugi jest opcjonalny i nie wpływa na wynik.
-        if (!(await utils.validateSecretCode(secret, null))) {
+        //
+        // Drugi argument to opcje. Bieżący WhatsApp Web czyta z nich
+        // options.unlockAppOnSuccess bez sprawdzania, czy w ogóle coś dostał,
+        // więc przekazane wcześniej null wywracało całą próbę komunikatem
+        // "Cannot read properties of null". Kolejne kształty wywołania są
+        // tu po to, żeby przetrwać zmianę sygnatury w obie strony.
+        const validate = async (): Promise<unknown> => {
+            const variants: unknown[][] = [
+                [secret, { unlockAppOnSuccess: true }],
+                [secret, {}],
+                [secret],
+            ];
+            let lastError: unknown = null;
+            for (const args of variants) {
+                try {
+                    return await utils.validateSecretCode(...args);
+                } catch (err) {
+                    // Zły kształt argumentów rozpoznajemy tylko po wyjątku -
+                    // odrzucone hasło zwraca wartość, a nie rzuca.
+                    lastError = err;
+                }
+            }
+            throw lastError;
+        };
+
+        if (!(await validate())) {
             // Dopiero teraz ma sens rozróżnienie: nie ma kodu w WhatsAppie,
             // czy jest, tylko inny niż w .env.
             let codeSet: boolean | null = null;

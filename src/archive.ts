@@ -30,7 +30,7 @@ import {
     NAME_RETRY_MS,
     placeholderName,
 } from './identity';
-import { log } from './log';
+import { describeError, log } from './log';
 import { MediaDownloader } from './media';
 import {
     bareId,
@@ -164,6 +164,8 @@ interface BackfillChatList {
     skippedNewChats: number;
     failedChats: number;
     newChatIds: string[];
+    /** Lista powstała z zapasowego źródła, więc na pewno nie jest pełna. */
+    listingDegraded?: boolean;
 }
 
 export class Archive {
@@ -476,7 +478,7 @@ export class Archive {
         }
         stats.skippedNewChats = listed.skippedNewChats;
         stats.failedChats = listed.failedChats;
-        if (listed.failedChats > 0) stats.complete = false;
+        if (listed.failedChats > 0 || listed.listingDegraded) stats.complete = false;
 
         if (listed.chats.length === 0) {
             progress(100, 'done', 'brak czatów do przetworzenia');
@@ -813,37 +815,29 @@ export class Archive {
 
         const ids = await this.rawChatIds();
         if (ids) {
-            const selected: string[] = [];
-            for (const chatId of ids) {
-                const exists = await this.hasExistingChatFolder(chatId);
-                if (!includeNewChats && !exists) {
-                    result.skippedNewChats++;
-                    continue;
-                }
-                if (includeNewChats && !exists) result.newChatIds.push(chatId);
-                selected.push(chatId);
-            }
-
-            for (const [index, chatId] of selected.entries()) {
-                try {
-                    const chat = await this.client.getChatById(chatId);
-                    if (chat) {
-                        result.chats.push(chat);
-                        onOpening?.(index + 1, selected.length, chat.name?.trim() || chatId);
-                    } else {
-                        result.failedChats++;
-                        onOpening?.(index + 1, selected.length, chatId);
-                    }
-                } catch (err) {
-                    result.failedChats++;
-                    log.quiet(err, { stage: 'nadrabianie: pobranie czatu', chat: chatId });
-                    onOpening?.(index + 1, selected.length, chatId);
-                }
-            }
+            await this.openChatsById(ids, includeNewChats, result, onOpening);
             return result;
         }
 
-        const chats = await this.client.getChats();
+        let chats: BackfillChat[];
+        try {
+            chats = await this.client.getChats();
+        } catch (err) {
+            // Ostatnia deska ratunku: czaty ze spisu archiwum. Bez niej jeden
+            // wadliwy model odbierał nadrabianie wszystkim pozostałym, więc po
+            // każdym offline zostawała dziura w rozmowach, które są tu od dawna.
+            const known = this.archivedChatIds();
+            if (known.length === 0) throw err;
+
+            log.warn(
+                `Lista czatów z WhatsAppa nie doszła (${describeError(err)}) - ` +
+                    'nadrabiam rozmowy, które są już w archiwum.',
+            );
+            result.listingDegraded = true;
+            await this.openChatsById(known, includeNewChats, result, onOpening);
+            return result;
+        }
+
         for (const chat of chats) {
             const chatId = chat.id?._serialized ?? null;
             const exists = chatId ? await this.hasExistingChatFolder(chatId) : false;
@@ -856,6 +850,55 @@ export class Archive {
             onOpening?.(result.chats.length, chats.length, chat.name?.trim() || chatId || 'nieznany czat');
         }
         return result;
+    }
+
+    /** Otwiera czaty pojedynczo, po identyfikatorach. */
+    private async openChatsById(
+        ids: readonly string[],
+        includeNewChats: boolean,
+        result: BackfillChatList,
+        onOpening?: (current: number, total: number, chat: string) => void,
+    ): Promise<void> {
+        const selected: string[] = [];
+        // Ten sam czat bywa w spisie pod numerem i pod @lid. Otwieramy go raz,
+        // zaczynając od numeru - dla niego WhatsApp częściej oddaje komplet danych.
+        const seenFolders = new Set<string>();
+
+        for (const chatId of [...ids].sort(phoneIdsFirst)) {
+            const folder = this.index.get(chatId)?.safeName ?? null;
+            if (folder && seenFolders.has(folder)) continue;
+
+            const exists = await this.hasExistingChatFolder(chatId);
+            if (!includeNewChats && !exists) {
+                result.skippedNewChats++;
+                continue;
+            }
+            if (includeNewChats && !exists) result.newChatIds.push(chatId);
+            if (folder) seenFolders.add(folder);
+            selected.push(chatId);
+        }
+
+        for (const [index, chatId] of selected.entries()) {
+            try {
+                const chat = await this.client.getChatById(chatId);
+                if (chat) {
+                    result.chats.push(chat);
+                    onOpening?.(index + 1, selected.length, chat.name?.trim() || chatId);
+                } else {
+                    result.failedChats++;
+                    onOpening?.(index + 1, selected.length, chatId);
+                }
+            } catch (err) {
+                result.failedChats++;
+                log.quiet(err, { stage: 'nadrabianie: pobranie czatu', chat: chatId });
+                onOpening?.(index + 1, selected.length, chatId);
+            }
+        }
+    }
+
+    /** Czaty ze spisu archiwum. Relacje mają własny przegląd i tu nie należą. */
+    private archivedChatIds(): string[] {
+        return [...this.index.keys()].filter((id) => id.includes('@') && !isStatusChat(id));
     }
 
     /** Same ID czatów, bez zawodnej serializacji pełnych modeli. */
@@ -1691,6 +1734,12 @@ export class Archive {
         this.identity.refreshAfterSync();
         for (const state of this.states.values()) state.nameRetryAt = 0;
     }
+}
+
+/** Numery przed @lid - dla numeru WhatsApp częściej oddaje komplet danych. */
+function phoneIdsFirst(a: string, b: string): number {
+    const rank = (id: string): number => (id.endsWith('@lid') ? 1 : 0);
+    return rank(a) - rank(b);
 }
 
 function containsCheckpoint(messages: readonly WaMessage[], checkpoint: SyncCheckpoint): boolean {

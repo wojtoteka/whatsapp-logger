@@ -12,7 +12,7 @@
     --edge: rgba(228, 237, 238, 0.1);
     --edge-strong: rgba(228, 237, 238, 0.2);
 
-    --serif: Georgia, 'Iowan Old Style', 'Palatino Linotype', serif;
+    --serif: 'Cyfry', Georgia, 'Iowan Old Style', 'Palatino Linotype', serif;
     --sans: 'Segoe UI', 'Noto Sans', 'Helvetica Neue', Arial, sans-serif;
     --mono: Consolas, 'DejaVu Sans Mono', 'SFMono-Regular', Menlo, monospace;
 
@@ -22,6 +22,17 @@
     --n4: #a8d98a;
     --n5: #e8918a;
     --n6: #c4a5e0;
+}
+
+/* Georgia i pokrewne kroje mają cyfry tekstowe: różnej wysokości, część
+   schodzi pod linię pisma. Nazwą czatu bywa sam numer telefonu i wygląda
+   wtedy jak rozsypany. Ten wpis podstawia pod same cyfry zwykły krój
+   bezszeryfowy; litery zostają szeryfowe, więc nagłówki się nie zmieniają. */
+@font-face {
+    font-family: 'Cyfry';
+    src: local('Segoe UI'), local('Noto Sans'), local('DejaVu Sans'),
+        local('Helvetica Neue'), local('Arial'), local('Liberation Sans');
+    unicode-range: U+0030-0039, U+002B;
 }
 
 *,
@@ -152,12 +163,14 @@ a:hover {
     color: var(--deep);
     font-weight: 600;
 }
+/* Licznik miał wcześniej dosuwanie transformem, przez co siedział krzywo
+   względem etykiety. Wspólne wyśrodkowanie z .tab załatwia to samo uczciwie. */
 .tab .count {
     font-family: var(--mono);
     font-size: 11.5px;
     line-height: 1;
     opacity: 0.75;
-    transform: translateY(1.5px);
+    font-variant-numeric: tabular-nums;
 }
 
 .page-title {
@@ -781,13 +794,15 @@ a:hover {
     word-break: break-all;
 }
 
+/* Ten sam rozmiar tekstu i ta sama wysokość co w zakładkach obok - inaczej
+   pigułka z kontem odstawała od "Rozmowy" i "Relacje". */
 .tab.logout {
     background: none;
     font-family: inherit;
+    font-size: 13.5px;
+    line-height: 1;
     cursor: pointer;
     max-width: min(240px, 42vw);
-    height: 34px;
-    padding-block: 6px;
 }
 .tab.logout .login-name {
     display: block;
@@ -795,12 +810,11 @@ a:hover {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-size: 15px;
     font-weight: 500;
     line-height: 1;
 }
 .tab.logout .logout-icon {
-    font-size: 17px;
+    font-size: 16px;
     line-height: 1;
 }
 .tab.logout:hover {
