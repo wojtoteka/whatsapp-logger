@@ -26,6 +26,8 @@ export interface Config {
     messagesPerFile: number;
     /** Ile ostatnich wiadomości z każdego czatu przejrzeć po uruchomieniu. */
     backfillMessagesPerChat: number;
+    /** Co ile minut lekko ponawiać synchronizację znanych czatów. 0 = wyłączone. */
+    syncIntervalMinutes: number;
     mediaTypes: ReadonlySet<string>;
     maxMediaSizeMb: number;
 
@@ -182,6 +184,7 @@ const KNOWN_KEYS = new Set([
     'LOGS_DIR',
     'MESSAGES_PER_FILE',
     'BACKFILL_MESSAGES_PER_CHAT',
+    'SYNC_INTERVAL_MINUTES',
     'MEDIA_TYPES',
     'MAX_MEDIA_SIZE_MB',
     'SAVE_PROFILE_PICS',
@@ -251,6 +254,10 @@ export function loadConfig(rootDir: string, env: Env = process.env): LoadResult 
         backfillMessagesPerChat: readNumber(env, 'BACKFILL_MESSAGES_PER_CHAT', 250, warnings, {
             min: 0,
             max: 10000,
+        }),
+        syncIntervalMinutes: readNumber(env, 'SYNC_INTERVAL_MINUTES', 15, warnings, {
+            min: 0,
+            max: 1440,
         }),
         mediaTypes: readMediaTypes(env, warnings),
         maxMediaSizeMb: readNumber(env, 'MAX_MEDIA_SIZE_MB', 100, warnings, { min: 0, max: 2048 }),

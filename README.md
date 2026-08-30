@@ -140,7 +140,7 @@ Po zakończeniu konfiguracji zwykłe `npm start` uruchamia logger i panel razem.
 
 ## Jak działa nadrabianie i deduplikacja
 
-Po połączeniu logger przegląda ostatnie wiadomości dostępne w WhatsApp Web. Przy zwykłym starcie robi to wyłącznie dla czatów, które mają już folder w archiwum. Domyślnie sprawdza do 250 pozycji i dopisuje tylko te, których identyfikatorów jeszcze nie zna.
+Po połączeniu logger przegląda ostatnie wiadomości dostępne w WhatsApp Web. Przy zwykłym starcie robi to wyłącznie dla czatów, które mają już folder w archiwum. Domyślnie zaczyna od 250 pozycji. Jeżeli nie znajdzie zapisanego checkpointu, stopniowo pogłębia okno, maksymalnie do 50 000 wiadomości, zamiast skanować całą historię od początku.
 
 Aby świadomie przeskanować wszystkie czaty widoczne dla sesji i utworzyć foldery także dla wcześniej niearchiwizowanych rozmów, uruchom:
 
@@ -148,13 +148,15 @@ Aby świadomie przeskanować wszystkie czaty widoczne dla sesji i utworzyć fold
 npm start -- --nadrob-wszystko
 ```
 
-To polecenie działa jednorazowo: nie uruchamia panelu, kończy pracę po zapisaniu znalezionych wiadomości i nadal respektuje limit `BACKFILL_MESSAGES_PER_CHAT`.
+To polecenie działa jednorazowo: nie uruchamia panelu i kończy pracę po zapisaniu znalezionych wiadomości. Pobiera listę wszystkich czatów widocznych dla sesji, również nieznanych lokalnie, a dostępną historię przekazuje do loggera partiami po 250 modeli. Limit `BACKFILL_MESSAGES_PER_CHAT` dotyczy tylko zwykłej synchronizacji przyrostowej.
 
 Najpierw wykorzystywany jest stabilny identyfikator nadany przez WhatsApp. Jeżeli wyjątkowo go brakuje, aplikacja tworzy deterministyczny identyfikator zastępczy z czasu i skrótu danych wiadomości. Dzięki temu ta sama wiadomość odebrana na żywo i znaleziona później podczas nadrabiania nie powinna pojawić się dwa razy.
 
-Lista ostatnio widzianych identyfikatorów znajduje się w `_state.json` danego czatu. Nie należy ręcznie usuwać tego pliku podczas działania aplikacji.
+Lista ostatnio widzianych identyfikatorów i ostatni poprawny checkpoint znajdują się w `_state.json` danego czatu. Checkpoint jest zapisywany dopiero po trwałym zapisie pobranej paczki. Nie należy ręcznie usuwać tego pliku podczas działania aplikacji.
 
-Nadrabianie nie jest pełną synchronizacją całej historii konta. Logger może zapisać tylko wiadomości, które bieżąca sesja WhatsApp Web faktycznie udostępni. Limit można zmienić przez `BACKFILL_MESSAGES_PER_CHAT`, a wartość `0` całkowicie wyłącza tę funkcję.
+Co 15 minut logger wykonuje lekką kontrolę przyrostową znanych czatów. Nie uruchamia dwóch przebiegów równolegle. Odstęp ustawia `SYNC_INTERVAL_MINUTES`, a `0` wyłącza wyłącznie kontrole okresowe.
+
+Pełne nadrabianie oznacza całą historię udostępnioną bieżącej sesji WhatsApp Web, nie gwarancję całej historii konta z telefonu. `whatsapp-web.js` musi najpierw załadować tę historię do swojej strony Chromium; logger odbiera ją później partiami i nie trzyma jednocześnie wszystkich obiektów wiadomości w procesie Node.
 
 ## Zabezpieczone czaty
 
@@ -185,6 +187,7 @@ Pełny wzór z komentarzami znajduje się w `.env.example`. Pusta wartość ozna
 | `LOGS_DIR` | `./logs` | Folder archiwum. |
 | `MESSAGES_PER_FILE` | `70` | Liczba wiadomości w jednej zamkniętej partii HTML/JSON. |
 | `BACKFILL_MESSAGES_PER_CHAT` | `250` | Liczba ostatnich wiadomości sprawdzanych w istniejących archiwach; `0` wyłącza. |
+| `SYNC_INTERVAL_MINUTES` | `15` | Odstęp lekkiej synchronizacji przyrostowej znanych czatów; `0` wyłącza. |
 | `STATE_SAVE_INTERVAL_MS` | `5000` | Minimalny odstęp między zapisami `_state.json`; `0` zapisuje po każdej zmianie. |
 | `MEDIA_TYPES` | wszystkie | Typy pobieranych mediów oddzielone przecinkami. |
 | `MAX_MEDIA_SIZE_MB` | `100` | Maksymalny rozmiar pojedynczego pobieranego pliku. |

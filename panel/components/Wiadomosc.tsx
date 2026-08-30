@@ -1,5 +1,5 @@
 import { fileUrl, toArchivePath } from '@/lib/archiwum';
-import { formatBytes, formatTime, isoDate, mediaKind, senderTone, typeName } from '@/lib/format';
+import { formatBytes, formatDateTime, formatTime, isoDate, mediaKind, senderTone, typeName } from '@/lib/format';
 import type { ArchivedMessage } from '@/lib/typy';
 import { Awatar } from './Awatar';
 import { MaterialIcon } from './MaterialIcon';
@@ -57,7 +57,10 @@ export function Wiadomosc({ message, folder }: Props) {
                 {deleted && (
                     <p className="gone">
                         <MaterialIcon name="delete" />
-                        <span>Skasowana w WhatsAppie. Treść została w archiwum.</span>
+                        <span>
+                            Skasowana w WhatsAppie. Treść została w archiwum.
+                            {message.deletedAt ? ` Wykryto: ${formatDateTime(Date.parse(message.deletedAt) / 1000)}.` : ''}
+                        </span>
                     </p>
                 )}
 

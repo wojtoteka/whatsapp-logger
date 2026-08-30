@@ -27,6 +27,9 @@ const MAX_AVATAR_MB = 5;
  */
 const RETRY_HOURS = 6;
 
+/** Jeden przegląd nie może zamienić się w tysiące zapytań do WhatsAppa. */
+const MAX_REFRESH_PER_SWEEP = 50;
+
 export interface RefreshStats {
     checked: number;
     changed: number;
@@ -84,11 +87,16 @@ export class AvatarStore {
         if (!this.config.saveProfilePics) return stats;
 
         const deadline = Date.now() - this.config.avatarRefreshDays * 24 * 60 * 60 * 1000;
-        const targets = new Set<string>([...candidateIds, ...this.history.keys()]);
+        const targets = [...new Set<string>([...candidateIds, ...this.history.keys()])]
+            .filter((id) => id && id !== 'me')
+            .filter((id) => {
+                const value = checkedAt(this.history.get(id));
+                return value === 0 || value <= deadline;
+            })
+            .sort((a, b) => checkedAt(this.history.get(a)) - checkedAt(this.history.get(b)))
+            .slice(0, MAX_REFRESH_PER_SWEEP);
 
         for (const id of targets) {
-            if (!id || id === 'me') continue;
-
             const record = this.history.get(id);
             if (record?.checkedAt && Date.parse(record.checkedAt) > deadline) continue;
 
@@ -108,6 +116,12 @@ export class AvatarStore {
         }
 
         return stats;
+    }
+
+    /** Bieżąca lokalna wersja bez kontaktowania się z WhatsAppem. */
+    cachedPathFor(id: string, chatDir: string): string | null {
+        const latest = this.latest(id);
+        return latest ? this.relativePath(latest, chatDir) : null;
     }
 
     // ── Pobieranie ───────────────────────────────────────────────────────
@@ -243,6 +257,12 @@ export class AvatarStore {
             log.error('Nie udało się zapisać historii zdjęć profilowych', err);
         }
     }
+}
+
+function checkedAt(record: AvatarRecord | undefined): number {
+    if (!record?.checkedAt) return 0;
+    const value = Date.parse(record.checkedAt);
+    return Number.isFinite(value) ? value : 0;
 }
 
 /**

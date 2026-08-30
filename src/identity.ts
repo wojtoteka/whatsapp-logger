@@ -141,10 +141,8 @@ export class IdentityResolver {
     async contactInfo(id: string): Promise<ContactInfo | null> {
         const cached = this.contacts.get(id);
         if (cached) {
-            // Na stałe zapamiętujemy tylko nazwę z książki adresowej - lepszej
-            // już nie będzie. Sam numer albo pustka to stan przejściowy:
-            // WhatsApp bywa, że dosyła nazwę dopiero po synchronizacji.
-            if (cached.info?.saved) return cached.info;
+            // Także nazwa z książki adresowej może zostać zmieniona na
+            // telefonie. Cache ogranicza liczbę zapytań, ale nie jest wieczny.
             if (Date.now() - cached.checkedAt < CONTACT_RETRY_MS) return cached.info;
         }
         if (typeof this.client.getContactById !== 'function') return null;
@@ -164,14 +162,11 @@ export class IdentityResolver {
     }
 
     /**
-     * Wyrzuca z pamięci wszystko, co nie jest nazwą z książki adresowej.
-     * Wołane po zsynchronizowaniu WhatsAppa: odpowiedzi sprzed synchronizacji
-     * były niepełne i nie mają prawa zablokować lepszej nazwy.
+     * Wyrzuca cache po synchronizacji. Odpowiedzi sprzed synchronizacji mogły
+     * być niepełne, a zapisane nazwy mogły zmienić się na telefonie.
      */
     refreshAfterSync(): void {
-        for (const [id, cached] of this.contacts) {
-            if (!cached.info?.saved) this.contacts.delete(id);
-        }
+        this.contacts.clear();
         this.badChats.clear();
     }
 }
@@ -253,7 +248,17 @@ export function chatIdOf(message: WaMessage | null): string | null {
  * do modelu w przeglądarce.
  */
 export function messageKey(message: WaMessage | null): string | null {
-    const id = message?.id as RawMessageId | string | undefined;
+    const protocolId = (message as (WaMessage & { protocolMessageKey?: unknown }) | null)
+        ?.protocolMessageKey as RawMessageId | string | undefined;
+    if (message?.type === 'revoked' && protocolId) {
+        const key = serializedMessageId(protocolId);
+        if (key) return key;
+    }
+
+    return serializedMessageId(message?.id as RawMessageId | string | undefined);
+}
+
+function serializedMessageId(id: RawMessageId | string | undefined): string | null {
     if (!id) return null;
     if (typeof id === 'string') return id || null;
 

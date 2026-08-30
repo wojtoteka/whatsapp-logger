@@ -49,6 +49,8 @@ export interface ArchivedMessage {
     mediaName: string | null;
     mediaSkipped: SkippedMedia | null;
     isDeleted: boolean;
+    /** Pole opcjonalne dla zgodności ze starszymi archiwami. */
+    deletedAt?: string | null;
     isForwarded: boolean;
     quotedMsg: QuotedInfo | null;
     location: LocationInfo | null;
@@ -68,10 +70,16 @@ export interface BatchFile {
 export interface ChatStateFile {
     chatName: string;
     nameTier?: number;
+    avatar?: string | null;
     batchNum: number;
     totalMessages: number;
     pendingMessages: ArchivedMessage[];
     seenIds?: string[];
+    sync?: {
+        messageId: string;
+        timestamp: number;
+        syncedAt: string;
+    } | null;
     lastUpdated: string;
 }
 
@@ -98,4 +106,6 @@ export interface MessagePage {
     total: number;
     /** Czy da się przewinąć dalej wstecz. */
     hasOlder: boolean;
+    /** Opaque cursor do następnej, starszej paczki. */
+    nextCursor: string | null;
 }

@@ -13,7 +13,17 @@ import { Client, LocalAuth } from 'whatsapp-web.js';
 import type { Config } from './config';
 import { describeError, log } from './log';
 import type { WaClient } from './types';
+import type { WaMessage } from './types';
 import { sleep } from './util';
+
+// whatsapp-web.js eksportuje konstruktor w runtime, ale w 1.34.6 deklaracje
+// TypeScript opisują Message wyłącznie jako interface. Ten dokładny konstruktor
+// jest używany także przez Chat.fetchMessages() w kodzie zainstalowanej wersji.
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const HistoryMessage = require('whatsapp-web.js/src/structures/Message') as new (
+    client: WaClient,
+    data: unknown,
+) => WaMessage;
 
 /** Argumenty przeglądarki - te same, które działają na Windowsie i Linuksie. */
 const PUPPETEER_ARGS = [
@@ -88,6 +98,106 @@ export function createClient(config: Config, rootDir: string): WaClient {
             ...(chromePath ? { executablePath: chromePath } : {}),
         },
     }) as WaClient;
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+//  Pełna historia w kontrolowanych paczkach
+// ─────────────────────────────────────────────────────────────────────────
+
+export interface FullHistoryScan {
+    supported: boolean;
+    total: number;
+}
+
+/**
+ * Ładuje dostępną historię do Store strony WhatsApp Web i zapamiętuje tam
+ * uporządkowane referencje. Zweryfikowane dla whatsapp-web.js 1.34.6:
+ * Chat.fetchMessages używa dokładnie Store.ConversationMsgs.loadEarlierMsgs.
+ */
+export async function prepareFullHistoryScan(
+    client: WaClient,
+    chatId: string,
+): Promise<FullHistoryScan> {
+    const page = client.pupPage;
+    if (!page || typeof page.evaluate !== 'function') return { supported: false, total: 0 };
+
+    return page.evaluate(async (id: string): Promise<FullHistoryScan> => {
+        /* eslint-disable @typescript-eslint/no-explicit-any */
+        const root = globalThis as any;
+        const win = root.window ?? root;
+        const store = win.Store;
+        if (!win.WWebJS?.getChat || !win.WWebJS?.getMessageModel) {
+            return { supported: false, total: 0 };
+        }
+        if (!store?.ConversationMsgs?.loadEarlierMsgs) {
+            return { supported: false, total: 0 };
+        }
+
+        const chat = await win.WWebJS.getChat(id, { getAsModel: false });
+        if (!chat?.msgs?.getModelsArray) return { supported: false, total: 0 };
+
+        while (true) {
+            const loaded = await store.ConversationMsgs.loadEarlierMsgs(chat, chat.msgs);
+            if (!loaded?.length) break;
+        }
+
+        const messages = chat.msgs
+            .getModelsArray()
+            .filter((message: any) => !message?.isNotification)
+            .sort((a: any, b: any) => {
+                const time = Number(a?.t ?? 0) - Number(b?.t ?? 0);
+                if (time !== 0) return time;
+                return String(a?.id?._serialized ?? a?.id?.id ?? '').localeCompare(
+                    String(b?.id?._serialized ?? b?.id?.id ?? ''),
+                );
+            });
+        win.__whatsappLoggerHistoryScan = { chatId: id, messages };
+        return { supported: true, total: messages.length };
+        /* eslint-enable @typescript-eslint/no-explicit-any */
+    }, chatId);
+}
+
+/** Zwraca tylko jedną paczkę modeli z przygotowanego skanu. */
+export async function readFullHistoryBatch(
+    client: WaClient,
+    chatId: string,
+    offset: number,
+    limit: number,
+): Promise<WaMessage[]> {
+    const page = client.pupPage;
+    if (!page || typeof page.evaluate !== 'function') return [];
+
+    const models = await page.evaluate(
+        (id: string, start: number, count: number): unknown[] => {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const root = globalThis as any;
+            const win = root.window ?? root;
+            const scan = win.__whatsappLoggerHistoryScan;
+            if (!scan || scan.chatId !== id || !Array.isArray(scan.messages)) return [];
+            return scan.messages
+                .slice(start, start + count)
+                .map((message: any) => win.WWebJS.getMessageModel(message));
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+        },
+        chatId,
+        offset,
+        limit,
+    );
+    return models.map((model) => new HistoryMessage(client, model));
+}
+
+export async function clearFullHistoryScan(client: WaClient, chatId: string): Promise<void> {
+    const page = client.pupPage;
+    if (!page || typeof page.evaluate !== 'function') return;
+    await page.evaluate((id: string) => {
+        /* eslint-disable @typescript-eslint/no-explicit-any */
+        const root = globalThis as any;
+        const win = root.window ?? root;
+        if (win.__whatsappLoggerHistoryScan?.chatId === id) {
+            delete win.__whatsappLoggerHistoryScan;
+        }
+        /* eslint-enable @typescript-eslint/no-explicit-any */
+    }, chatId);
 }
 
 // ─────────────────────────────────────────────────────────────────────────

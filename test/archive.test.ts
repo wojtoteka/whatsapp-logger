@@ -252,6 +252,9 @@ test('nadrabianie przegląda poprzednie czaty i dopisuje tylko brakujące wiadom
             saved: 1,
             skipped: 1,
             failedChats: 0,
+            newChats: 0,
+            updated: 0,
+            complete: true,
         });
         assert.equal(syncCalls, 1);
         assert.equal(requestedLimit, 25);
@@ -264,6 +267,9 @@ test('nadrabianie przegląda poprzednie czaty i dopisuje tylko brakujące wiadom
             saved: 0,
             skipped: 2,
             failedChats: 0,
+            newChats: 0,
+            updated: 0,
+            complete: true,
         });
 
         const state = await readState(dir, '5550100');
@@ -306,6 +312,9 @@ test('zwykłe nadrabianie pomija czat bez folderu, a jawny tryb może go założ
             saved: 0,
             skipped: 0,
             failedChats: 0,
+            newChats: 0,
+            updated: 0,
+            complete: true,
         });
         assert.equal(fetchCalls, 0);
         assert.deepEqual(await listFiles(dir), []);
@@ -323,6 +332,9 @@ test('zwykłe nadrabianie pomija czat bez folderu, a jawny tryb może go założ
                 saved: 1,
                 skipped: 0,
                 failedChats: 0,
+                newChats: 1,
+                updated: 0,
+                complete: true,
             },
         );
         assert.equal(fetchCalls, 1);
@@ -372,10 +384,74 @@ test('nadrabianie rozwija czaty pojedynczo, gdy zbiorcze getChats jest uszkodzon
                 saved: 1,
                 skipped: 0,
                 failedChats: 1,
+                newChats: 1,
+                updated: 0,
+                complete: false,
             },
         );
         assert.equal(getChatsCalls, 0);
         assert.equal(getChatByIdCalls, 2);
+    });
+});
+
+test('pełne nadrabianie żąda całej dostępnej historii i deduplikuje istniejący rekord', async () => {
+    await withTempDir(async (dir) => {
+        const old = fakeMessage({ id: 'old', from: '999@lid', body: 'już zapisane', timestamp: 10 });
+        const older = fakeMessage({ id: 'older', from: '999@lid', body: 'starsza historia', timestamp: 5 });
+        let requestedLimit = 0;
+        const client = fakeClient({ lidToPhone: { '999@lid': '5550100@c.us' } });
+        client.getChats = async () =>
+            [
+                {
+                    id: { _serialized: '999@lid' },
+                    fetchMessages: async ({ limit }: { limit: number }) => {
+                        requestedLimit = limit;
+                        return [old, older];
+                    },
+                },
+            ] as unknown as Awaited<ReturnType<typeof client.getChats>>;
+
+        const archive = new Archive(testConfig(dir), client);
+        await archive.save(old);
+        const stats = await archive.backfillRecent(250, {
+            includeNewChats: true,
+            fullHistory: true,
+        });
+
+        assert.equal(requestedLimit, Number.POSITIVE_INFINITY);
+        assert.equal(stats.saved, 1);
+        assert.equal(stats.skipped, 1);
+        const state = await readState(dir, '5550100');
+        assert.equal(state.totalMessages, 2);
+        assert.equal(state.sync?.messageId, 'old');
+    });
+});
+
+test('zmiana zapisanej nazwy aktualizuje ten sam czat bez duplikowania wiadomości', async () => {
+    await withTempDir(async (dir) => {
+        const contact = {
+            id: { _serialized: '5550100@c.us' },
+            number: '5550100',
+            name: 'Albert Z',
+            isMyContact: true,
+        };
+        const options = {
+            lidToPhone: { '999@lid': '5550100@c.us' },
+            contacts: { '5550100@c.us': contact, '999@lid': contact },
+        };
+        const message = fakeMessage({ id: 'same-id', from: '999@lid', contact });
+
+        const first = new Archive(testConfig(dir), fakeClient(options));
+        assert.equal(await first.save(message), true);
+
+        contact.name = 'Albert';
+        const restarted = new Archive(testConfig(dir), fakeClient(options));
+        assert.equal(await restarted.save(message), false);
+
+        const state = await readState(dir, 'Albert');
+        assert.equal(state.chatName, 'Albert');
+        assert.equal(state.totalMessages, 1);
+        await assert.rejects(fs.access(path.join(dir, 'Albert Z')));
     });
 });
 
@@ -509,6 +585,12 @@ test('wiadomość skasowana po zapisaniu pliku dostaje notkę wprost w HTML', as
         const html = await fs.readFile(file, 'utf8');
         assert.ok(html.includes('Skasowana w WhatsAppie'));
         assert.ok(html.includes('żałuję'), 'treść zostaje w archiwum');
+
+        const batch = JSON.parse(
+            await fs.readFile(path.join(dir, '5550100', 'messages_0001.json'), 'utf8'),
+        ) as { messages: Array<{ isDeleted: boolean; deletedAt?: string | null }> };
+        assert.equal(batch.messages[0]?.isDeleted, true);
+        assert.ok(batch.messages[0]?.deletedAt);
     });
 });
 

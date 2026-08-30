@@ -118,6 +118,10 @@ async function main(): Promise<void> {
 class Runtime {
     private retentionTimer: NodeJS.Timeout | null = null;
     private sweepTimer: NodeJS.Timeout | null = null;
+    private incrementalTimer: NodeJS.Timeout | null = null;
+    private incrementalRunning = false;
+    private incrementalFailures = 0;
+    private incrementalRetryAt = 0;
     private readyFallbackTimer: NodeJS.Timeout | null = null;
     private readyStarted = false;
     private shuttingDown = false;
@@ -251,7 +255,10 @@ class Runtime {
         const backfill = await this.backfillMessages(this.backfillAll);
 
         if (this.backfillAll) {
-            const failed = backfill?.listingFailed === true || (backfill?.failedChats ?? 0) > 0;
+            const failed =
+                backfill?.listingFailed === true ||
+                backfill?.complete === false ||
+                (backfill?.failedChats ?? 0) > 0;
             if (failed) {
                 log.error('Nadrabianie zakończone z błędami - sprawdź podsumowanie powyżej.');
             } else {
@@ -267,46 +274,110 @@ class Runtime {
         void this.notifier.ready();
         this.startRetention();
         this.startSweep();
+        this.startIncrementalSync();
     }
 
     /** Dobiera wiadomości z czasu, gdy proces nie działał. */
     private async backfillMessages(includeNewChats: boolean): Promise<BackfillStats | null> {
-        if (this.config.backfillMessagesPerChat <= 0) {
+        if (!includeNewChats && this.config.backfillMessagesPerChat <= 0) {
             log.info('Nadrabianie wiadomości: wyłączone.');
             return null;
         }
 
         log.info(
             includeNewChats
-                ? `Nadrabianie wiadomości: sprawdzam do ${this.config.backfillMessagesPerChat} na każdy dostępny czat...`
+                ? 'Pełne nadrabianie: pobieram wszystkie rozmowy i całą historię dostępną w WhatsApp Web...'
                 : `Nadrabianie wiadomości: sprawdzam do ${this.config.backfillMessagesPerChat} w czatach obecnych w archiwum...`,
         );
-        const stats = await this.archive.backfillRecent(undefined, {
-            includeNewChats,
-            ...(includeNewChats
-                ? {
-                      onProgress: (progress) => {
-                          const chat = progress.chat ? ` - ${consoleLabel(progress.chat)}` : '';
-                          log.progress(
-                              `Nadrabianie ${String(progress.percent).padStart(3, ' ')}%: ` +
-                                  `${progress.detail}${chat}`,
-                          );
-                      },
-                  }
-                : {}),
-        });
+        const stats = await this.archive.backfillRecent(
+            Math.max(this.config.backfillMessagesPerChat, 250),
+            {
+                includeNewChats,
+                fullHistory: includeNewChats,
+                ...(includeNewChats
+                    ? {
+                          onProgress: (progress) => {
+                              const chat = progress.chat ? ` - ${consoleLabel(progress.chat)}` : '';
+                              log.progress(
+                                  `Nadrabianie ${String(progress.percent).padStart(3, ' ')}%: ` +
+                                      `${progress.detail}${chat}`,
+                              );
+                          },
+                      }
+                    : {}),
+            },
+        );
         if (includeNewChats) log.endProgress();
         const failed = stats.failedChats > 0 ? `, błędów czatów ${stats.failedChats}` : '';
         const newChats =
             stats.skippedNewChats > 0
                 ? `, pominiętych czatów bez folderu ${stats.skippedNewChats}`
                 : '';
+        const created = stats.newChats > 0 ? `, nowych rozmów ${stats.newChats}` : '';
+        const updated = stats.updated > 0 ? `, zaktualizowanych ${stats.updated}` : '';
+        const completeness = stats.complete ? '' : ', zakres niepełny';
         log.info(
             `Nadrabianie wiadomości: dopisano ${stats.saved}, ` +
                 `już zapisanych ${stats.skipped}, przejrzano ${stats.scanned} ` +
-                `w ${stats.chats} czatach${newChats}${failed}.`,
+                `w ${stats.chats} czatach${created}${updated}${newChats}${failed}${completeness}.`,
         );
         return stats;
+    }
+
+    /** Lekka kontrola znanych czatów, bez równoległych przebiegów. */
+    private startIncrementalSync(): void {
+        if (this.incrementalTimer || this.config.syncIntervalMinutes <= 0) {
+            if (this.config.syncIntervalMinutes <= 0) log.info('Synchronizacja okresowa: wyłączona.');
+            return;
+        }
+
+        log.info(`Synchronizacja okresowa: co ${this.config.syncIntervalMinutes} min.`);
+        this.incrementalTimer = setInterval(
+            () => void this.runIncrementalSync(),
+            this.config.syncIntervalMinutes * 60 * 1000,
+        );
+        this.incrementalTimer.unref?.();
+    }
+
+    private async runIncrementalSync(): Promise<void> {
+        if (
+            this.incrementalRunning ||
+            this.shuttingDown ||
+            Date.now() < this.incrementalRetryAt
+        ) {
+            return;
+        }
+        this.incrementalRunning = true;
+        try {
+            this.archive.refreshAfterSync();
+            const stats = await this.archive.backfillRecent();
+            if (stats.saved > 0 || stats.updated > 0) {
+                log.info(
+                    `Synchronizacja okresowa: nowych ${stats.saved}, zaktualizowanych ${stats.updated}.`,
+                );
+            }
+            if (stats.complete) {
+                this.incrementalFailures = 0;
+                this.incrementalRetryAt = 0;
+            } else {
+                this.scheduleIncrementalBackoff();
+            }
+        } catch (err) {
+            log.error('Błąd synchronizacji okresowej', err, { stage: 'synchronizacja okresowa' });
+            this.scheduleIncrementalBackoff();
+        } finally {
+            this.incrementalRunning = false;
+        }
+    }
+
+    private scheduleIncrementalBackoff(): void {
+        this.incrementalFailures++;
+        const base = this.config.syncIntervalMinutes * 60 * 1000;
+        const delay = Math.min(base * 2 ** this.incrementalFailures, 6 * 60 * 60 * 1000);
+        this.incrementalRetryAt = Date.now() + delay;
+        log.warn(
+            `Synchronizacja okresowa: kolejna próba najwcześniej za ${Math.ceil(delay / 60000)} min.`,
+        );
     }
 
     /** Kończy proces kodem, który nadzorca rozpoznaje jako awarię przejściową. */
@@ -353,8 +424,10 @@ class Runtime {
         });
 
         // Skasowane "dla wszystkich" - "before" to jeszcze pełna treść.
-        this.client.on('message_revoke_everyone', (_after, before) => {
-            if (before) void this.archive.markDeleted(before as WaMessage);
+        this.client.on('message_revoke_everyone', (after, before) => {
+            // W 1.34.6 parametr "before" może być undefined. "after" nadal
+            // niesie identyfikator wiadomości i wystarcza do oznaczenia rekordu.
+            void this.archive.markDeleted((before ?? after) as WaMessage);
         });
 
         // Skasowane "dla mnie".
@@ -472,6 +545,7 @@ class Runtime {
 
         if (this.retentionTimer) clearInterval(this.retentionTimer);
         if (this.sweepTimer) clearInterval(this.sweepTimer);
+        if (this.incrementalTimer) clearInterval(this.incrementalTimer);
         this.clearReadyFallback();
 
         try {
@@ -505,6 +579,7 @@ function printConfig(config: Config, envFileFound: boolean): void {
     log.info(`  Archiwum                 ${config.logsDir}`);
     log.info(`  Wiadomości na plik       ${config.messagesPerFile}`);
     log.info(`  Nadrabianie na czat      ${config.backfillMessagesPerChat}`);
+    log.info(`  Synchronizacja okresowa  ${config.syncIntervalMinutes > 0 ? `co ${config.syncIntervalMinutes} min` : 'wyłączona'}`);
     log.info(`  Pobierane media          ${[...config.mediaTypes].join(', ') || '(żadne)'}`);
     log.info(`  Limit pliku              ${config.maxMediaSizeMb} MB`);
     log.info(`  Zdjęcia profilowe        ${config.saveProfilePics ? `tak, odświeżanie co ${config.avatarRefreshDays} dni` : 'nie'}`);

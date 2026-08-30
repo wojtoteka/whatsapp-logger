@@ -5,6 +5,7 @@ import { formatDate, formatDateTime, messageCount } from '@/lib/format';
 import { Awatar } from '@/components/Awatar';
 import { MaterialIcon } from '@/components/MaterialIcon';
 import { Wiadomosc } from '@/components/Wiadomosc';
+import { Odswiezanie } from '@/components/Odswiezanie';
 
 export const dynamic = 'force-dynamic';
 
@@ -13,7 +14,7 @@ const NA_STRONE = 60;
 
 interface Props {
     params: Promise<{ slug: string }>;
-    searchParams: Promise<{ strona?: string }>;
+    searchParams: Promise<{ strona?: string; przed?: string }>;
 }
 
 export async function generateMetadata({ params }: Props) {
@@ -24,22 +25,23 @@ export async function generateMetadata({ params }: Props) {
 
 export default async function StronaCzatu({ params, searchParams }: Props) {
     const { slug } = await params;
-    const { strona } = await searchParams;
+    const { strona, przed } = await searchParams;
 
     const folder = fromSlug(slug);
     const chat = await loadChat(folder);
     if (!chat) notFound();
 
     const page = Math.max(1, Number.parseInt(strona ?? '1', 10) || 1);
-    const { messages, hasOlder } = await loadMessages(folder, {
+    const { messages, hasOlder, nextCursor } = await loadMessages(folder, {
         limit: NA_STRONE,
-        offset: (page - 1) * NA_STRONE,
+        ...(przed ? { cursor: przed } : { offset: (page - 1) * NA_STRONE }),
     });
 
     const wrocDo = chat.isStatus ? '/relacje' : '/';
 
     return (
         <main>
+            <Odswiezanie enabled={!przed && page === 1} />
             <Link className="back" href={wrocDo}>
                 <MaterialIcon name="arrowBack" />
                 <span>{chat.isStatus ? 'Wszystkie relacje' : 'Wszystkie rozmowy'}</span>
@@ -53,7 +55,7 @@ export default async function StronaCzatu({ params, searchParams }: Props) {
                         {chat.isStatus ? 'Relacje · ' : ''}
                         {messageCount(chat.messageCount)}
                         {chat.lastMessageAt ? ` · ostatnia ${formatDateTime(chat.lastMessageAt)}` : ''}
-                        {page > 1 ? ` · strona ${page}` : ''}
+                        {przed ? ' · starsza część' : page > 1 ? ` · strona ${page}` : ''}
                     </p>
                 </div>
             </header>
@@ -74,17 +76,17 @@ export default async function StronaCzatu({ params, searchParams }: Props) {
             )}
 
             <nav className="pager" aria-label="Nawigacja między stronami">
-                {page > 1 ? (
-                    <Link href={`/czat/${slug}?strona=${page - 1}`}>
+                {przed || page > 1 ? (
+                    <Link href={`/czat/${slug}`}>
                         <MaterialIcon name="arrowBack" />
-                        <span>Nowsze wiadomości</span>
+                        <span>Najnowsze wiadomości</span>
                     </Link>
                 ) : (
                     <span>To najnowsze wiadomości</span>
                 )}
 
                 {hasOlder ? (
-                    <Link href={`/czat/${slug}?strona=${page + 1}`}>
+                    <Link href={`/czat/${slug}?przed=${encodeURIComponent(nextCursor ?? '')}`}>
                         <span>Starsze wiadomości</span>
                         <MaterialIcon name="arrowForward" />
                     </Link>

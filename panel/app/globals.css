@@ -116,9 +116,15 @@ a:hover {
 
 .tabs {
     display: flex;
+    align-items: center;
     gap: 8px;
     margin-left: auto;
     flex-wrap: wrap;
+    min-width: 0;
+}
+.tabs form {
+    display: flex;
+    min-width: 0;
 }
 
 .tab {
@@ -131,6 +137,9 @@ a:hover {
     color: var(--dim);
     text-decoration: none;
     font-size: 13.5px;
+    line-height: 1;
+    min-height: 34px;
+    min-width: 0;
     transition: border-color 0.15s, color 0.15s, background 0.15s;
 }
 .tab:hover {
@@ -168,7 +177,7 @@ a:hover {
 .chat-grid {
     display: grid;
     gap: 10px;
-    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr));
 }
 
 .chat-card {
@@ -181,6 +190,8 @@ a:hover {
     border-radius: 11px;
     text-decoration: none;
     color: inherit;
+    min-width: 0;
+    overflow: hidden;
     transition: border-color 0.15s, transform 0.15s, background 0.15s;
 }
 .chat-card:hover {
@@ -195,17 +206,25 @@ a:hover {
 }
 .chat-card .row {
     display: flex;
-    align-items: baseline;
+    align-items: center;
     gap: 10px;
+    min-width: 0;
+    width: 100%;
 }
 .chat-card .name {
+    display: block;
+    flex: 1 1 auto;
+    min-width: 0;
+    max-width: 100%;
     font-weight: 600;
     font-size: 15px;
+    line-height: 1.35;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
 }
 .chat-card .when {
+    flex: 0 0 auto;
     margin-left: auto;
     font-size: 11.5px;
     color: var(--dim);
@@ -280,12 +299,16 @@ a:hover {
     border-bottom: 1px solid var(--edge);
     margin-bottom: 18px;
 }
+.chat-head > div {
+    min-width: 0;
+}
 .chat-head h1 {
     font-family: var(--serif);
     font-weight: 400;
     font-size: 25px;
     line-height: 1.15;
     word-break: break-word;
+    overflow-wrap: anywhere;
 }
 .chat-head .sub {
     color: var(--dim);
@@ -660,8 +683,16 @@ a:hover {
     background: none;
     font-family: inherit;
     cursor: pointer;
+    max-width: min(240px, 42vw);
+    height: 34px;
+    padding-block: 6px;
 }
 .tab.logout .login-name {
+    display: block;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     font-size: 15px;
     font-weight: 500;
     line-height: 1;
@@ -700,8 +731,34 @@ a:hover {
 }
 
 @media (max-width: 640px) {
+    .shell {
+        padding-inline: 12px;
+    }
+    .masthead {
+        margin-inline: -12px;
+        padding: 10px 12px;
+        gap: 10px;
+    }
+    .tabs {
+        width: 100%;
+        margin-left: 0;
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        padding-bottom: 2px;
+    }
+    .tab {
+        flex: 0 0 auto;
+        padding-inline: 12px;
+    }
+    .tabs form {
+        margin-left: auto;
+        max-width: 44%;
+    }
+    .tab.logout {
+        max-width: 100%;
+    }
     .chat-grid {
-        grid-template-columns: 1fr;
+        grid-template-columns: minmax(0, 1fr);
     }
     .bubble {
         max-width: 86%;

@@ -38,6 +38,7 @@ export interface MessageRow {
     mediaSkipped: string | null;
     avatarPath: string | null;
     isDeleted: boolean;
+    deletedAt: string | null;
     isForwarded: boolean;
     quoted: string | null;
     location: string | null;
@@ -84,6 +85,7 @@ export const SCHEMA: readonly string[] = [
         media_skipped TEXT         NULL,
         avatar_path   VARCHAR(500) NULL,
         is_deleted    TINYINT(1)   NOT NULL DEFAULT 0,
+        deleted_at    DATETIME(3)  NULL,
         is_forwarded  TINYINT(1)   NOT NULL DEFAULT 0,
         quoted        TEXT         NULL,
         location      TEXT         NULL,
@@ -157,6 +159,7 @@ export function toMessageRow(
         mediaSkipped: json(message.mediaSkipped),
         avatarPath: toArchivePath(chatFolder, message.avatar),
         isDeleted: message.isDeleted,
+        deletedAt: sqlDate(message.deletedAt),
         isForwarded: message.isForwarded,
         quoted: json(message.quotedMsg),
         location: json(message.location),
@@ -208,6 +211,17 @@ export class Database {
 
             for (const statement of SCHEMA) await this.pool.query(statement);
 
+            // CREATE TABLE nie dodaje kolumn do istniejącej instalacji.
+            // Migracja jest celowo mała i idempotentna.
+            const [deletedAtColumns] = await this.pool.query(
+                "SHOW COLUMNS FROM messages LIKE 'deleted_at'",
+            );
+            if (Array.isArray(deletedAtColumns) && deletedAtColumns.length === 0) {
+                await this.pool.query(
+                    'ALTER TABLE messages ADD COLUMN deleted_at DATETIME(3) NULL AFTER is_deleted',
+                );
+            }
+
             this.ready = true;
             return {
                 ok: true,
@@ -248,11 +262,11 @@ export class Database {
      * oznaczenie skasowanej albo powtórka z przeglądu nie robi duplikatu.
      */
     async saveMessage(row: MessageRow): Promise<void> {
-        await this.run(
+        const result = await this.run(
             `INSERT INTO messages
                 (id, chat_id, ts, sender, from_me, type, body, media_path, media_name,
-                 media_skipped, avatar_path, is_deleted, is_forwarded, quoted, location, contacts, poll)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 media_skipped, avatar_path, is_deleted, deleted_at, is_forwarded, quoted, location, contacts, poll)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON DUPLICATE KEY UPDATE
                 body = VALUES(body),
                 media_path = VALUES(media_path),
@@ -260,6 +274,7 @@ export class Database {
                 media_skipped = VALUES(media_skipped),
                 avatar_path = VALUES(avatar_path),
                 is_deleted = VALUES(is_deleted),
+                deleted_at = VALUES(deleted_at),
                 quoted = VALUES(quoted)`,
             [
                 row.id,
@@ -274,6 +289,7 @@ export class Database {
                 row.mediaSkipped,
                 row.avatarPath,
                 row.isDeleted,
+                row.deletedAt,
                 row.isForwarded,
                 row.quoted,
                 row.location,
@@ -282,18 +298,28 @@ export class Database {
             ],
         );
 
-        await this.run(
-            `UPDATE chats
-                SET message_count = (SELECT COUNT(*) FROM messages WHERE chat_id = ?),
-                    last_message_at = (SELECT MAX(ts) FROM messages WHERE chat_id = ?)
-              WHERE id = ?`,
-            [row.chatId, row.chatId, row.chatId],
-        );
+        // COUNT(*) i MAX() po całej rozmowie przy każdej wiadomości dawały
+        // koszt rosnący wraz z archiwum. Licznik zmieniamy tylko dla INSERT.
+        if ((result as mysql.ResultSetHeader | null)?.affectedRows === 1) {
+            await this.run(
+                `UPDATE chats
+                    SET message_count = message_count + 1,
+                        last_message_at = CASE
+                            WHEN last_message_at IS NULL OR last_message_at < ? THEN ?
+                            ELSE last_message_at
+                        END
+                  WHERE id = ?`,
+                [row.ts, row.ts, row.chatId],
+            );
+        }
     }
 
     /** Oznacza wiadomość jako skasowaną, jeśli baza ją zna. */
-    async markDeleted(messageId: string): Promise<void> {
-        await this.run('UPDATE messages SET is_deleted = 1 WHERE id = ?', [messageId]);
+    async markDeleted(messageId: string, detectedAt: string): Promise<void> {
+        await this.run(
+            'UPDATE messages SET is_deleted = 1, deleted_at = COALESCE(deleted_at, ?) WHERE id = ?',
+            [sqlDate(detectedAt), messageId],
+        );
     }
 
     /** Zapisuje ścieżkę do bieżącego zdjęcia profilowego czatu. */
@@ -365,6 +391,13 @@ export class Database {
             return null;
         }
     }
+}
+
+function sqlDate(value: string | null | undefined): string | null {
+    if (!value) return null;
+    const date = new Date(value);
+    if (!Number.isFinite(date.getTime())) return null;
+    return date.toISOString().slice(0, 23).replace('T', ' ');
 }
 
 function describe(err: unknown): string {

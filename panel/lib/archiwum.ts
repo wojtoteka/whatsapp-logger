@@ -9,6 +9,7 @@
 
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { cache } from 'react';
 import type {
     ArchivedMessage,
     BatchFile,
@@ -125,7 +126,7 @@ async function readSource(folder: string, file: string): Promise<ArchivedMessage
 // ─────────────────────────────────────────────────────────────────────────
 
 /** Wszystkie czaty w archiwum, osobno rozmowy i osobno relacje. */
-export async function listChats(): Promise<{ rozmowy: ChatSummary[]; relacje: ChatSummary[] }> {
+async function listChatsUncached(): Promise<{ rozmowy: ChatSummary[]; relacje: ChatSummary[] }> {
     const root = logsDir();
     const folders: string[] = [];
 
@@ -141,7 +142,7 @@ export async function listChats(): Promise<{ rozmowy: ChatSummary[]; relacje: Ch
         folders.push(name);
     }
 
-    const summaries = await Promise.all(folders.map((folder) => summarize(folder)));
+    const summaries = await mapLimit(folders, 16, summarize);
     const known = summaries.filter((s): s is ChatSummary => s !== null);
 
     const byRecency = (a: ChatSummary, b: ChatSummary): number =>
@@ -151,6 +152,27 @@ export async function listChats(): Promise<{ rozmowy: ChatSummary[]; relacje: Ch
         rozmowy: known.filter((c) => !c.isStatus).sort(byRecency),
         relacje: known.filter((c) => c.isStatus).sort(byRecency),
     };
+}
+
+/** Layout i strona główna pytają o tę samą listę w jednym renderze. */
+export const listChats = cache(listChatsUncached);
+
+async function mapLimit<T, R>(
+    values: readonly T[],
+    limit: number,
+    mapper: (value: T) => Promise<R>,
+): Promise<R[]> {
+    const result = new Array<R>(values.length);
+    let next = 0;
+    const workers = Array.from({ length: Math.min(limit, values.length) }, async () => {
+        while (true) {
+            const index = next++;
+            if (index >= values.length) return;
+            result[index] = await mapper(values[index]!);
+        }
+    });
+    await Promise.all(workers);
+    return result;
 }
 
 /**
@@ -176,7 +198,7 @@ async function summarize(folder: string): Promise<ChatSummary | null> {
 
     // Zdjęcie profilowe bierzemy z najnowszej wiadomości, która je ma -
     // dzięki temu na liście widać to aktualne.
-    let avatar: string | null = null;
+    let avatar: string | null = toArchivePath(folder, state?.avatar ?? null);
     for (let i = newest.length - 1; i >= 0; i--) {
         const candidate = newest[i]?.avatar;
         if (candidate) {
@@ -225,7 +247,9 @@ export interface PageOptions {
     /** Ile wiadomości na stronę. */
     limit: number;
     /** Ile pominąć, licząc od najnowszej. */
-    offset: number;
+    offset?: number;
+    /** Opaque cursor zwrócony przez poprzednią stronę. */
+    cursor?: string | null;
 }
 
 /**
@@ -239,40 +263,74 @@ export async function loadMessages(folder: string, options: PageOptions): Promis
     const sources = await chatSources(folder);
 
     // Od najnowszego: najpierw partia w toku, potem zamknięte partie od tyłu.
-    const chunks: Array<() => Promise<ArchivedMessage[]>> = [
-        async () => (Array.isArray(state?.pendingMessages) ? state.pendingMessages : []),
-        ...[...sources].reverse().map((file) => () => readSource(folder, file)),
+    const chunks: Array<{ key: string; load: () => Promise<ArchivedMessage[]> }> = [
+        {
+            key: '_state',
+            load: async () => (Array.isArray(state?.pendingMessages) ? state.pendingMessages : []),
+        },
+        ...[...sources].reverse().map((file) => ({ key: file, load: () => readSource(folder, file) })),
     ];
 
-    // Bierzemy jedną wiadomość ponad limit. Jeśli się doczytała, to znaczy,
-    // że jest co pokazywać dalej - i nie musimy w tym celu liczyć całości.
-    const wanted = options.limit + 1;
+    const decoded = decodeCursor(options.cursor);
+    let sourceIndex = decoded ? chunks.findIndex((chunk) => chunk.key === decoded.source) : 0;
+    if (sourceIndex < 0) sourceIndex = 0;
+    let cursorIndex = decoded?.index ?? -1;
     const collected: ArchivedMessage[] = [];
     let skipped = 0;
+    let nextCursor: string | null = null;
 
-    for (const load of chunks) {
-        if (collected.length >= wanted) break;
-
-        const messages = await load();
-        for (let i = messages.length - 1; i >= 0; i--) {
-            if (skipped < options.offset) {
+    for (let chunkIndex = sourceIndex; chunkIndex < chunks.length; chunkIndex++) {
+        const chunk = chunks[chunkIndex]!;
+        const messages = await chunk.load();
+        const start = chunkIndex === sourceIndex && cursorIndex >= 0 ? cursorIndex : messages.length - 1;
+        for (let i = start; i >= 0; i--) {
+            if (skipped < (options.offset ?? 0)) {
                 skipped++;
                 continue;
             }
             collected.push(messages[i]!);
-            if (collected.length >= wanted) break;
+            if (collected.length >= options.limit) {
+                if (i - 1 >= 0) {
+                    nextCursor = encodeCursor({ source: chunk.key, index: i - 1 });
+                } else if (chunkIndex + 1 < chunks.length) {
+                    nextCursor = encodeCursor({ source: chunks[chunkIndex + 1]!.key, index: -1 });
+                }
+                break;
+            }
         }
+        if (collected.length >= options.limit) break;
     }
 
-    const hasOlder = collected.length > options.limit;
-
     return {
-        messages: collected.slice(0, options.limit),
+        messages: collected,
         // Licznik prowadzi logger w _state.json, więc nie ma po co
         // przeliczać całego archiwum przy każdym wejściu na stronę.
         total: state?.totalMessages ?? 0,
-        hasOlder,
+        hasOlder: nextCursor !== null,
+        nextCursor,
     };
+}
+
+interface MessageCursor {
+    source: string;
+    index: number;
+}
+
+function encodeCursor(cursor: MessageCursor): string {
+    return Buffer.from(JSON.stringify(cursor), 'utf8').toString('base64url');
+}
+
+function decodeCursor(value: string | null | undefined): MessageCursor | null {
+    if (!value || value.length > 512) return null;
+    try {
+        const parsed = JSON.parse(Buffer.from(value, 'base64url').toString('utf8')) as Partial<MessageCursor>;
+        const index = parsed.index;
+        if (typeof parsed.source !== 'string' || typeof index !== 'number' || !Number.isInteger(index)) return null;
+        if (parsed.source !== '_state' && !/^messages_\d+\.json$/.test(parsed.source)) return null;
+        return { source: parsed.source, index: Math.max(-1, index) };
+    } catch {
+        return null;
+    }
 }
 
 /** Nazwa i podstawowe dane czatu, bez czytania wiadomości. */

@@ -78,11 +78,20 @@ export interface ArchivedMessage {
     mediaName: string | null;
     mediaSkipped: SkippedMedia | null;
     isDeleted: boolean;
+    /** Kiedy logger dowiedział się o usunięciu. Brak w starszych archiwach. */
+    deletedAt?: string | null;
     isForwarded: boolean;
     quotedMsg: QuotedInfo | null;
     location: LocationInfo | null;
     contacts: VCardInfo[] | null;
     poll: PollInfo | null;
+}
+
+/** Trwały punkt, do którego zakończyła się przyrostowa synchronizacja czatu. */
+export interface SyncCheckpoint {
+    messageId: string;
+    timestamp: number;
+    syncedAt: string;
 }
 
 /**
@@ -100,11 +109,15 @@ export interface BatchFile {
 export interface ChatStateFile {
     chatName: string;
     nameTier: NameTier;
+    /** Bieżące zdjęcie czatu, względne wobec folderu czatu. */
+    avatar?: string | null;
     batchNum: number;
     totalMessages: number;
     pendingMessages: ArchivedMessage[];
     /** Ostatnie identyfikatory wiadomości - żeby nie dublować ich po restarcie. */
     seenIds?: string[];
+    /** Punkt zapisywany dopiero po trwałym zapisaniu całej pobranej paczki. */
+    sync?: SyncCheckpoint | null;
     lastUpdated: string;
 }
 

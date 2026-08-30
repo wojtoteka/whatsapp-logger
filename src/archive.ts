@@ -10,7 +10,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { Config } from './config';
 import type { Database } from './db';
-import { toMessageRow } from './db';
+import { toArchivePath as toDatabaseArchivePath, toMessageRow } from './db';
 import { AvatarStore } from './avatars';
 import {
     batchDataName,
@@ -41,6 +41,11 @@ import {
     statusChatId,
 } from './statuses';
 import { NameTier } from './types';
+import {
+    clearFullHistoryScan,
+    prepareFullHistoryScan,
+    readFullHistoryBatch,
+} from './waClient';
 import type {
     ArchivedMessage,
     BatchFile,
@@ -49,6 +54,7 @@ import type {
     LocationInfo,
     PollInfo,
     QuotedInfo,
+    SyncCheckpoint,
     VCardInfo,
     WaClient,
     WaContact,
@@ -65,6 +71,7 @@ import {
     safeFileName,
     writeFileAtomic,
     writeJsonAtomic,
+    sleep,
 } from './util';
 
 /** Wiadomości systemowe, których nie ma sensu archiwizować. */
@@ -80,6 +87,12 @@ const IGNORED_TYPES = new Set([
 /** Tyle ostatnich identyfikatorów wystarczy do bezpiecznego nadrabiania historii. */
 const SEEN_ID_LIMIT = 10_000;
 
+/**
+ * syncHistory() 1.34.6 potwierdza wysłanie żądania, nie otrzymanie danych.
+ * Po pozytywnym wyniku dajemy stronie krótki czas na przyjęcie odpowiedzi.
+ */
+const PEER_SYNC_SETTLE_MS = 3_000;
+
 interface ChatState {
     id: string;
     name: string;
@@ -94,6 +107,7 @@ interface ChatState {
     pending: ArchivedMessage[];
     seenIds: string[];
     seenIdSet: Set<string>;
+    sync: SyncCheckpoint | null;
     saveTimer: NodeJS.Timeout | null;
     lastSaveAt: number;
     /** Identyfikator prosto z wiadomości, zwykle @lid. */
@@ -101,6 +115,7 @@ interface ChatState {
     nameRetryAt: number;
     /** Ostatnia ścieżka zdjęcia zapisana do bazy - żeby nie pisać w kółko. */
     lastAvatarPath: string | null;
+    currentAvatar: string | null;
 }
 
 export interface StatusSweepStats {
@@ -118,11 +133,19 @@ export interface BackfillStats {
     saved: number;
     skipped: number;
     failedChats: number;
+    /** Czaty, dla których tryb pełny utworzył nowe archiwum. */
+    newChats: number;
+    /** Istniejące rekordy zmienione podczas synchronizacji, np. oznaczone jako usunięte. */
+    updated: number;
+    /** Czy żądany zakres historii został pobrany w całości. */
+    complete: boolean;
 }
 
 export interface BackfillOptions {
     /** true pozwala utworzyć foldery dla czatów, których nie ma w archiwum. */
     includeNewChats?: boolean;
+    /** Pobiera całą historię, którą bieżąca sesja WhatsApp Web udostępnia. */
+    fullHistory?: boolean;
     /** Postęp dla trybu interaktywnego, np. --nadrob-wszystko. */
     onProgress?: (progress: BackfillProgress) => void;
 }
@@ -140,6 +163,7 @@ interface BackfillChatList {
     chats: BackfillChat[];
     skippedNewChats: number;
     failedChats: number;
+    newChatIds: string[];
 }
 
 export class Archive {
@@ -192,9 +216,20 @@ export class Archive {
      * Zwraca true, gdy faktycznie coś doszło - przegląd relacji liczy po tym,
      * ile rzeczy było nowych.
      */
-    async save(message: WaMessage, options: { forceStatus?: boolean } = {}): Promise<boolean> {
+    async save(
+        message: WaMessage,
+        options: { forceStatus?: boolean; knownIds?: ReadonlySet<string> } = {},
+    ): Promise<boolean> {
         try {
             if (IGNORED_TYPES.has(message.type)) return false;
+
+            // Podczas synchronizacji WhatsApp może zwrócić już tylko model
+            // typu "revoked". Nie dokładamy go jako pustej wiadomości -
+            // aktualizujemy wcześniej zapisany rekord.
+            if (message.type === 'revoked') {
+                await this.markDeleted(message);
+                return false;
+            }
 
             const isStatus = options.forceStatus === true || isStatusMessage(message);
             const rawId = isStatus ? statusAuthorId(message) : chatIdOf(message);
@@ -214,7 +249,9 @@ export class Archive {
                 this.aliases.set(aliasKey, chatId);
             }
 
-            return await this.enqueue(chatId, () => this.process(message, chatId, rawId));
+            return await this.enqueue(chatId, () =>
+                this.process(message, chatId, rawId, options.knownIds),
+            );
         } catch (err) {
             log.error('Błąd zapisu wiadomości', err, {
                 stage: 'save',
@@ -256,19 +293,25 @@ export class Archive {
     }
 
     /** Właściwe przetworzenie wiadomości - już w kolejce danego czatu. */
-    private async process(message: WaMessage, chatId: string, rawId: string): Promise<boolean> {
+    private async process(
+        message: WaMessage,
+        chatId: string,
+        rawId: string,
+        knownIds?: ReadonlySet<string>,
+    ): Promise<boolean> {
         const state = this.states.get(chatId);
         if (!state) return false;
 
         const msgId = archiveMessageId(message, state.id);
 
-        // Zdarzenie na żywo i przegląd historii mogą podać tę samą wiadomość.
-        // Stabilny identyfikator sprawia, że do archiwum trafi tylko raz.
-        if (state.seenIdSet.has(msgId)) return false;
-
-        // Czat prowadzony pod samymi cyframi dostaje prawdziwą nazwę, gdy
-        // tylko ją poznamy - razem z folderem na dysku.
+        // Nazwę sprawdzamy również przy duplikacie z synchronizacji. Dzięki
+        // temu zmiana nazwy kontaktu nie wymaga nowej wiadomości w rozmowie.
         await this.maybeUpgradeName(message, state, rawId);
+
+        // Zdarzenie na żywo i przegląd historii mogą podać tę samą wiadomość.
+        // Tryb pełny przekazuje dodatkowo komplet ID istniejącego archiwum,
+        // bo jego zakres może być większy niż szybki cache ostatnich 10 000.
+        if (state.seenIdSet.has(msgId) || knownIds?.has(msgId)) return false;
 
         let senderName = 'Ja';
         let avatar: string | null = null;
@@ -306,6 +349,7 @@ export class Archive {
             mediaName: media.name,
             mediaSkipped: media.skipped,
             isDeleted: false,
+            deletedAt: null,
             isForwarded: message.isForwarded === true,
             quotedMsg: await this.quotedInfo(message),
             location: locationInfo(message),
@@ -326,6 +370,7 @@ export class Archive {
         // zmieniło - inaczej byłby jeden UPDATE na każdą wiadomość.
         if (row.avatarPath && row.avatarPath !== state.lastAvatarPath) {
             state.lastAvatarPath = row.avatarPath;
+            state.currentAvatar = avatar;
             await this.db?.setChatAvatar(state.id, row.avatarPath);
         }
 
@@ -379,8 +424,12 @@ export class Archive {
             saved: 0,
             skipped: 0,
             failedChats: 0,
+            newChats: 0,
+            updated: 0,
+            complete: true,
         };
-        const wanted = Math.max(0, Math.floor(limit));
+        const fullHistory = options.fullHistory === true;
+        const wanted = fullHistory ? Number.POSITIVE_INFINITY : Math.max(0, Math.floor(limit));
         if (wanted === 0 || typeof this.client.getChats !== 'function') return stats;
 
         const progress = (
@@ -410,6 +459,7 @@ export class Archive {
             );
         } catch (err) {
             stats.listingFailed = true;
+            stats.complete = false;
             log.error('Nie udało się pobrać czatów do nadrobienia', err, {
                 stage: 'nadrabianie: lista czatów',
             });
@@ -417,6 +467,7 @@ export class Archive {
         }
         stats.skippedNewChats = listed.skippedNewChats;
         stats.failedChats = listed.failedChats;
+        if (listed.failedChats > 0) stats.complete = false;
 
         if (listed.chats.length === 0) {
             progress(100, 'done', 'brak czatów do przetworzenia');
@@ -441,7 +492,11 @@ export class Archive {
                         chatName,
                     );
                     try {
-                        await chat.syncHistory();
+                        const requested = await chat.syncHistory();
+                        // W 1.34.6 true oznacza wysłanie żądania do urządzenia
+                        // głównego, nie dostarczenie wiadomości. Krótka pauza
+                        // pozwala Store przyjąć odpowiedź przed fetchMessages.
+                        if (requested) await sleep(PEER_SYNC_SETTLE_MS);
                     } catch (err) {
                         log.quiet(err, { stage: 'nadrabianie: syncHistory', chat: chatId });
                     }
@@ -450,11 +505,109 @@ export class Archive {
                 progress(
                     chatStart + chatShare * 0.25,
                     'fetching',
-                    `pobieram do ${wanted} wiadomości (${chatIndex + 1}/${chatTotal})`,
+                    fullHistory
+                        ? `przygotowuję pełną historię (${chatIndex + 1}/${chatTotal})`
+                        : `pobieram do ${wanted} wiadomości (${chatIndex + 1}/${chatTotal})`,
                     chatName,
                 );
-                const messages = (await chat.fetchMessages({ limit: wanted })) as WaMessage[];
+
+                if (fullHistory && chatId) {
+                    const scan = await prepareFullHistoryScan(this.client, chatId);
+                    if (scan.supported) {
+                        const knownIds = await this.allMessageIds(chatId);
+                        let newest: WaMessage | null = null;
+                        const batchSize = 250;
+                        try {
+                            for (let offset = 0; offset < scan.total; offset += batchSize) {
+                                const messages = await readFullHistoryBatch(
+                                    this.client,
+                                    chatId,
+                                    offset,
+                                    batchSize,
+                                );
+                                if (messages.length === 0 && offset < scan.total) {
+                                    throw new Error('WhatsApp Web przerwał odczyt przygotowanej historii');
+                                }
+                                newest = messages[messages.length - 1] ?? newest;
+                                await this.saveBackfillBatch(messages, stats, knownIds, null);
+                                const done = Math.min(offset + messages.length, scan.total);
+                                const part = scan.total > 0 ? done / scan.total : 1;
+                                progress(
+                                    chatStart + chatShare * (0.3 + part * 0.7),
+                                    'saving',
+                                    `zapisuję wiadomości ${done}/${scan.total} ` +
+                                        `(${chatIndex + 1}/${chatTotal} czatów)`,
+                                    chatName,
+                                );
+                            }
+                        } finally {
+                            await clearFullHistoryScan(this.client, chatId).catch((err) =>
+                                log.quiet(err, { stage: 'czyszczenie pełnego skanu', chat: chatId }),
+                            );
+                        }
+                        if (newest) await this.commitCheckpoint(chatId, newest);
+                        progress(
+                            chatStart + chatShare,
+                            'saving',
+                            `zakończono czat ${chatIndex + 1}/${chatTotal}`,
+                            chatName,
+                        );
+                        continue;
+                    }
+
+                    // Klient testowy albo przyszła wersja biblioteki bez
+                    // zweryfikowanych modułów Store. Publiczne API pozostaje
+                    // poprawnym, choć pamięciożernym planem awaryjnym.
+                    log.warn(
+                        `Pełne nadrabianie ${chatName}: brak odczytu paczkowego, używam publicznego fetchMessages.`,
+                    );
+                }
+                let requestedLimit = wanted;
+                let messages = (await chat.fetchMessages({ limit: requestedLimit })) as WaMessage[];
+
+                const checkpoint = fullHistory ? null : await this.checkpointFor(chatId);
+                if (checkpoint && Number.isFinite(requestedLimit)) {
+                    // Jeśli cała paczka jest nowsza od checkpointu, przerwa
+                    // offline była większa niż zwykłe okno. Pogłębiamy je
+                    // stopniowo, zamiast skanować całą historię od początku.
+                    let previousLength = -1;
+                    while (
+                        !containsCheckpoint(messages, checkpoint) &&
+                        oldestTimestamp(messages) > checkpoint.timestamp &&
+                        messages.length > previousLength &&
+                        requestedLimit < 50_000
+                    ) {
+                        previousLength = messages.length;
+                        requestedLimit = Math.min(requestedLimit * 2, 50_000);
+                        progress(
+                            chatStart + chatShare * 0.27,
+                            'fetching',
+                            `pogłębiam zakres do ${requestedLimit} wiadomości`,
+                            chatName,
+                        );
+                        messages = (await chat.fetchMessages({ limit: requestedLimit })) as WaMessage[];
+                    }
+                    if (
+                        !containsCheckpoint(messages, checkpoint) &&
+                        oldestTimestamp(messages) > checkpoint.timestamp
+                    ) {
+                        stats.complete = false;
+                        log.warn(
+                            `Nadrabianie ${chatName}: checkpoint jest starszy niż bezpieczne okno 50000 wiadomości. ` +
+                                'Zapisano dostępny nowszy zakres; uruchom --nadrob-wszystko dla pełnej kontroli.',
+                        );
+                    }
+                }
                 messages.sort((a, b) => a.timestamp - b.timestamp);
+
+                // Pełny tryb czyta ID istniejącego archiwum po jednym pliku.
+                // Trzymamy tylko identyfikatory jednego czatu, nie wiadomości
+                // wszystkich czatów, i zwalniamy zbiór po zakończeniu czatu.
+                const knownIds =
+                    fullHistory || messages.length > SEEN_ID_LIMIT
+                        ? await this.allMessageIds(chatId)
+                        : null;
+                const newest = messages[messages.length - 1] ?? null;
 
                 for (const [messageIndex, message] of messages.entries()) {
                     if (
@@ -473,9 +626,26 @@ export class Archive {
                         );
                     }
                     stats.scanned++;
-                    if (await this.save(message)) stats.saved++;
-                    else stats.skipped++;
+                    if (message.type === 'revoked') {
+                        if (await this.markDeleted(message)) stats.updated++;
+                        else stats.skipped++;
+                        continue;
+                    }
+                    if (checkpoint && !fullHistory && !isAfterCheckpoint(message, checkpoint)) {
+                        stats.skipped++;
+                        continue;
+                    }
+
+                    if (await this.save(message, { ...(knownIds ? { knownIds } : {}) })) {
+                        stats.saved++;
+                        const id = messageKey(message);
+                        if (id) knownIds?.add(id);
+                    } else {
+                        stats.skipped++;
+                    }
                 }
+
+                if (newest) await this.commitCheckpoint(chatId, newest);
                 progress(
                     chatStart + chatShare,
                     'saving',
@@ -484,6 +654,7 @@ export class Archive {
                 );
             } catch (err) {
                 stats.failedChats++;
+                stats.complete = false;
                 log.quiet(err, { stage: 'nadrabianie czatu', chat: chatId });
                 progress(
                     chatStart + chatShare,
@@ -494,8 +665,120 @@ export class Archive {
             }
         }
 
+        for (const chatId of listed.newChatIds) {
+            if (await this.hasExistingChatFolder(chatId)) stats.newChats++;
+        }
+
         progress(100, 'done', 'zapis zakończony');
         return stats;
+    }
+
+    private async saveBackfillBatch(
+        messages: readonly WaMessage[],
+        stats: BackfillStats,
+        knownIds: Set<string> | null,
+        checkpoint: SyncCheckpoint | null,
+    ): Promise<void> {
+        for (const message of messages) {
+            stats.scanned++;
+            if (message.type === 'revoked') {
+                if (await this.markDeleted(message)) stats.updated++;
+                else stats.skipped++;
+                continue;
+            }
+            if (checkpoint && !isAfterCheckpoint(message, checkpoint)) {
+                stats.skipped++;
+                continue;
+            }
+            if (await this.save(message, { ...(knownIds ? { knownIds } : {}) })) {
+                stats.saved++;
+                const id = messageKey(message);
+                if (id) knownIds?.add(id);
+            } else {
+                stats.skipped++;
+            }
+        }
+    }
+
+    /** Checkpoint znanego czatu bez inicjalizowania wszystkich stanów. */
+    private async checkpointFor(chatId: string | null): Promise<SyncCheckpoint | null> {
+        if (!chatId) return null;
+        const canonical = this.aliases.get(chatId) ?? chatId;
+        const inMemory = this.states.get(canonical);
+        if (inMemory?.sync) return inMemory.sync;
+
+        const known = this.index.get(canonical) ?? this.index.get(chatId);
+        if (!known?.safeName) return null;
+
+        const dir = path.join(this.config.logsDir, known.safeName);
+        const saved = await readJson<ChatStateFile>(path.join(dir, '_state.json'));
+        if (saved?.sync?.messageId) return saved.sync;
+
+        // Migracja starego archiwum: najnowszy rekord staje się pierwszym
+        // checkpointem. Czytamy tylko stan i ostatnią partię, nie całą historię.
+        let latest = lastByTimestamp(saved?.pendingMessages ?? []);
+        if (!latest) {
+            const files = (await listDir(dir))
+                .filter((file) => /^messages_\d+\.json$/.test(file))
+                .sort();
+            const lastFile = files[files.length - 1];
+            if (lastFile) {
+                const batch = await readJson<BatchFile>(path.join(dir, lastFile));
+                latest = lastByTimestamp(batch?.messages ?? []);
+            }
+        }
+        return latest
+            ? {
+                  messageId: latest.id,
+                  timestamp: latest.timestamp,
+                  syncedAt: saved?.lastUpdated ?? new Date(0).toISOString(),
+              }
+            : null;
+    }
+
+    /** Wszystkie ID jednego czatu, używane wyłącznie przez jawny pełny skan. */
+    private async allMessageIds(chatId: string | null): Promise<Set<string>> {
+        const ids = new Set<string>();
+        if (!chatId) return ids;
+
+        const canonical = this.aliases.get(chatId) ?? chatId;
+        const state = this.states.get(canonical);
+        const known = this.index.get(canonical) ?? this.index.get(chatId);
+        const dir = state?.chatDir ?? (known?.safeName ? path.join(this.config.logsDir, known.safeName) : null);
+        if (!dir) return ids;
+
+        const saved = await readJson<ChatStateFile>(path.join(dir, '_state.json'));
+        for (const message of saved?.pendingMessages ?? state?.pending ?? []) {
+            if (message?.id) ids.add(message.id);
+        }
+
+        const files = (await listDir(dir))
+            .filter((file) => /^messages_\d+\.json$/.test(file))
+            .sort();
+        for (const file of files) {
+            const batch = await readJson<BatchFile>(path.join(dir, file));
+            for (const message of batch?.messages ?? []) {
+                if (message?.id) ids.add(message.id);
+            }
+        }
+        return ids;
+    }
+
+    /** Zapisuje checkpoint dopiero po zapisaniu wszystkich wiadomości paczki. */
+    private async commitCheckpoint(chatId: string | null, newest: WaMessage): Promise<void> {
+        if (!chatId) return;
+        const rawId = chatIdOf(newest) ?? chatId;
+        const canonical = this.aliases.get(rawId) ?? this.aliases.get(chatId) ?? chatId;
+        const state = this.states.get(canonical);
+        if (!state) return;
+
+        const previous = state.sync;
+        state.sync = {
+            messageId: archiveMessageId(newest, state.id),
+            timestamp: newest.timestamp,
+            syncedAt: new Date().toISOString(),
+        };
+        if (!(await this.saveState(state))) state.sync = previous;
     }
 
     /**
@@ -516,16 +799,19 @@ export class Archive {
             chats: [],
             skippedNewChats: 0,
             failedChats: 0,
+            newChatIds: [],
         };
 
         const ids = await this.rawChatIds();
         if (ids) {
             const selected: string[] = [];
             for (const chatId of ids) {
-                if (!includeNewChats && !(await this.hasExistingChatFolder(chatId))) {
+                const exists = await this.hasExistingChatFolder(chatId);
+                if (!includeNewChats && !exists) {
                     result.skippedNewChats++;
                     continue;
                 }
+                if (includeNewChats && !exists) result.newChatIds.push(chatId);
                 selected.push(chatId);
             }
 
@@ -551,10 +837,12 @@ export class Archive {
         const chats = await this.client.getChats();
         for (const chat of chats) {
             const chatId = chat.id?._serialized ?? null;
-            if (!includeNewChats && (!chatId || !(await this.hasExistingChatFolder(chatId)))) {
+            const exists = chatId ? await this.hasExistingChatFolder(chatId) : false;
+            if (!includeNewChats && (!chatId || !exists)) {
                 result.skippedNewChats++;
                 continue;
             }
+            if (includeNewChats && chatId && !exists) result.newChatIds.push(chatId);
             result.chats.push(chat);
             onOpening?.(result.chats.length, chats.length, chat.name?.trim() || chatId || 'nieznany czat');
         }
@@ -637,14 +925,20 @@ export class Archive {
      * rzadziej, bo to zapytania do przeglądarki.
      */
     private async maybeUpgradeName(message: WaMessage, state: ChatState, rawId: string): Promise<void> {
-        if (state.nameTier >= NameTier.SAVED) return;
-
         if (Date.now() - state.nameRetryAt < NAME_RETRY_MS) return;
         state.nameRetryAt = Date.now();
 
         const identity = await this.identity.resolve(message, state.rawId ?? rawId);
         if (!identity) return;
-        if (identity.tier > state.nameTier && identity.name !== state.name) {
+
+        // Nazwa zapisanego kontaktu jest zmienną metadaną. Przyjmujemy lepszy
+        // poziom nazwy, a na tym samym wiarygodnym poziomie także jej zmianę.
+        const sameReliableTier =
+            identity.tier === state.nameTier && identity.tier >= NameTier.NICK;
+        if (
+            identity.name !== state.name &&
+            (identity.tier > state.nameTier || sameReliableTier)
+        ) {
             await this.renameChat(state, identity.name, identity.tier);
         }
     }
@@ -785,6 +1079,7 @@ export class Archive {
             pending: Array.isArray(saved?.pendingMessages) ? saved.pendingMessages : [],
             seenIds,
             seenIdSet: new Set(seenIds),
+            sync: saved?.sync ?? null,
             saveTimer: null,
             lastSaveAt: 0,
             rawId,
@@ -792,6 +1087,7 @@ export class Archive {
             // tej samej wiadomości.
             nameRetryAt: Date.now(),
             lastAvatarPath: null,
+            currentAvatar: saved?.avatar ?? null,
         };
 
         this.states.set(chatId, state);
@@ -800,7 +1096,8 @@ export class Archive {
         // Nazwa z tego uruchomienia jest lepsza niż zapamiętana - przenosimy.
         // Gorszej nie przyjmujemy: raz zdobyty numer czy nazwisko nie ma
         // wracać do cyfr @lid tylko dlatego, że WhatsApp dziś ich nie podał.
-        if (chatTier > useTier && chatName !== useName) {
+        const sameReliableTier = chatTier === useTier && chatTier >= NameTier.NICK;
+        if (chatName !== useName && (chatTier > useTier || sameReliableTier)) {
             await this.renameChat(state, chatName, chatTier);
         }
     }
@@ -872,7 +1169,7 @@ export class Archive {
         state.saveTimer.unref?.();
     }
 
-    private async saveState(state: ChatState): Promise<void> {
+    private async saveState(state: ChatState): Promise<boolean> {
         if (state.saveTimer) {
             clearTimeout(state.saveTimer);
             state.saveTimer = null;
@@ -882,17 +1179,21 @@ export class Archive {
         const data: ChatStateFile = {
             chatName: state.name,
             nameTier: state.nameTier,
+            avatar: state.currentAvatar,
             batchNum: state.batchNum,
             totalMessages: state.totalMessages,
             pendingMessages: state.pending,
+            sync: state.sync,
             lastUpdated: new Date().toISOString(),
         };
         if (state.seenIds.length > 0) data.seenIds = state.seenIds;
 
         try {
             await writeJsonAtomic(path.join(state.chatDir, '_state.json'), data);
+            return true;
         } catch (err) {
             log.error(`Nie udało się zapisać stanu czatu "${state.name}"`, err);
+            return false;
         }
     }
 
@@ -976,55 +1277,95 @@ export class Archive {
      * Jeśli czeka jeszcze w partii - poprawiamy stan; jeśli trafiła już do
      * pliku HTML - dopisujemy notkę wprost w nim.
      */
-    async markDeleted(message: WaMessage | null): Promise<void> {
+    async markDeleted(message: WaMessage | null): Promise<boolean> {
         const msgId = messageKey(message);
-        if (!msgId) return;
+        if (!msgId) return false;
+        const detectedAt = new Date().toISOString();
 
         for (const [chatId, state] of this.states) {
             const pending = state.pending.find((m) => m.id === msgId);
             if (!pending) continue;
 
+            let changed = false;
             await this.enqueue(chatId, async () => {
+                if (pending.isDeleted) return;
                 pending.isDeleted = true;
+                pending.deletedAt = detectedAt;
+                changed = true;
                 await this.saveState(state);
                 await this.db?.saveMessage(toMessageRow(pending, state.id, state.safeName));
             });
-            log.info(`[skasowana - zachowana] ${pending.from}: ${pending.body.slice(0, 60)}`);
-            return;
+            if (changed) {
+                log.info(`[skasowana - zachowana] ${pending.from}: ${pending.body.slice(0, 60)}`);
+            }
+            return changed;
         }
 
-        await this.db?.markDeleted(msgId);
+        await this.db?.markDeleted(msgId, detectedAt);
 
-        const patched = await this.patchDeletedInFiles(message, msgId);
+        const patched = await this.patchDeletedInFiles(message, msgId, detectedAt);
         if (!patched) await this.logDeletedId(msgId);
+        return patched;
     }
 
-    /** Szuka wiadomości w zapisanych plikach HTML i dopisuje w nich notkę. */
-    private async patchDeletedInFiles(message: WaMessage | null, msgId: string): Promise<boolean> {
+    /** Szuka wiadomości w zapisanych JSON/HTML i oznacza ją w obu formatach. */
+    private async patchDeletedInFiles(
+        message: WaMessage | null,
+        msgId: string,
+        detectedAt: string,
+    ): Promise<boolean> {
         const rawId = chatIdOf(message);
         const chatId = rawId ? (this.aliases.get(rawId) ?? rawId) : null;
         const state = chatId ? this.states.get(chatId) : null;
 
-        // Znany czat przeszukujemy od najnowszej partii - skasowana wiadomość
-        // prawie zawsze jest świeża. Nieznanego nie przeszukujemy w ogóle,
-        // bo oznaczałoby to czytanie całego archiwum przy każdym zdarzeniu.
-        const dirs = state ? [state.chatDir] : [];
+        // Stan nie musi być jeszcze otwarty w tej sesji. Spis po stabilnym ID
+        // pozwala wskazać dokładnie jeden folder bez skanowania całego logs/.
+        const known = chatId ? (this.index.get(chatId) ?? (rawId ? this.index.get(rawId) : undefined)) : undefined;
+        const dir = state?.chatDir ??
+            (known?.safeName ? path.join(this.config.logsDir, known.safeName) : null);
+        const dirs = dir ? [dir] : [];
         for (const dir of dirs) {
-            const files = (await listDir(dir))
-                .filter((f) => /^messages_\d+\.html$/.test(f))
+            const jsonFiles = (await listDir(dir))
+                .filter((f) => /^messages_\d+\.json$/.test(f))
                 .sort()
                 .reverse();
 
-            for (const file of files) {
+            for (const file of jsonFiles) {
+                const full = path.join(dir, file);
+                const batch = await readJson<BatchFile>(full);
+                const archived = batch?.messages?.find((entry) => entry.id === msgId);
+                if (!batch || !archived) continue;
+
+                if (!archived.isDeleted) {
+                    archived.isDeleted = true;
+                    archived.deletedAt = detectedAt;
+                    await writeJsonAtomic(full, batch);
+                }
+
+                const batchNumber = Number.parseInt(/(\d+)/.exec(file)?.[1] ?? '', 10);
+                const htmlFile = Number.isFinite(batchNumber)
+                    ? path.join(dir, batchFileName(batchNumber))
+                    : null;
+                if (htmlFile) {
+                    const html = await readText(htmlFile);
+                    const patchedHtml = html === null ? null : markDeletedInHtml(html, msgId);
+                    if (patchedHtml !== null) await writeFileAtomic(htmlFile, patchedHtml);
+                }
+                log.info(`[skasowana - zachowana] oznaczono w ${path.basename(dir)}/${file}`);
+                return true;
+            }
+
+            // Bardzo stare archiwum może mieć tylko HTML, bez sąsiedniego JSON.
+            const htmlFiles = (await listDir(dir))
+                .filter((f) => /^messages_\d+\.html$/.test(f))
+                .sort()
+                .reverse();
+            for (const file of htmlFiles) {
                 const full = path.join(dir, file);
                 const html = await readText(full);
-                if (html === null) continue;
-
-                const patched = markDeletedInHtml(html, msgId);
-                if (patched === null) continue;
-
-                await writeFileAtomic(full, patched);
-                log.info(`[skasowana - zachowana] oznaczono w ${path.basename(dir)}/${file}`);
+                const patchedHtml = html === null ? null : markDeletedInHtml(html, msgId);
+                if (patchedHtml === null) continue;
+                await writeFileAtomic(full, patchedHtml);
                 return true;
             }
         }
@@ -1130,7 +1471,29 @@ export class Archive {
                 perFolder.set(entry.safeName, id);
             }
         }
-        return this.avatars.refreshAll(perFolder.values());
+        const stats = await this.avatars.refreshAll(perFolder.values());
+
+        // Nowa wersja ma od razu trafić na listę rozmów, także gdy w czacie
+        // nie przyszła właśnie żadna wiadomość.
+        for (const state of this.states.values()) {
+            const candidates = [state.id, state.rawId].filter(
+                (id, index, all): id is string => Boolean(id) && all.indexOf(id) === index,
+            );
+            let current: string | null = null;
+            for (const id of candidates) {
+                current = this.avatars.cachedPathFor(id, state.chatDir);
+                if (current) break;
+            }
+            if (!current || current === state.currentAvatar) continue;
+
+            state.currentAvatar = current;
+            await this.saveState(state);
+            await this.db?.setChatAvatar(
+                state.id,
+                toDatabaseArchivePath(state.safeName, current),
+            );
+        }
+        return stats;
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -1319,6 +1682,30 @@ export class Archive {
         this.identity.refreshAfterSync();
         for (const state of this.states.values()) state.nameRetryAt = 0;
     }
+}
+
+function containsCheckpoint(messages: readonly WaMessage[], checkpoint: SyncCheckpoint): boolean {
+    return messages.some((message) => messageKey(message) === checkpoint.messageId);
+}
+
+function oldestTimestamp(messages: readonly WaMessage[]): number {
+    let oldest = Number.POSITIVE_INFINITY;
+    for (const message of messages) oldest = Math.min(oldest, message.timestamp);
+    return oldest;
+}
+
+function isAfterCheckpoint(message: WaMessage, checkpoint: SyncCheckpoint): boolean {
+    if (message.timestamp > checkpoint.timestamp) return true;
+    if (message.timestamp < checkpoint.timestamp) return false;
+    return messageKey(message) !== checkpoint.messageId;
+}
+
+function lastByTimestamp(messages: readonly ArchivedMessage[]): ArchivedMessage | null {
+    let latest: ArchivedMessage | null = null;
+    for (const message of messages) {
+        if (!latest || message.timestamp > latest.timestamp) latest = message;
+    }
+    return latest;
 }
 
 /** Taki sam krótki podgląd wiadomości, jaki pokazywała wersja sprzed przepisania. */

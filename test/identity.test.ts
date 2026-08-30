@@ -206,3 +206,11 @@ test('brak identyfikatora daje null, a nie wymyśloną wartość', () => {
     assert.equal(messageKey({ id: {} } as never), null);
     assert.equal(messageHash(null), null);
 });
+
+test('model revoked bez before wskazuje oryginalne ID przez protocolMessageKey', () => {
+    const message = fakeMessage({ id: 'techniczny', type: 'revoked' });
+    (message as unknown as { protocolMessageKey: unknown }).protocolMessageKey = {
+        _serialized: 'oryginalna-wiadomosc',
+    };
+    assert.equal(messageKey(message), 'oryginalna-wiadomosc');
+});

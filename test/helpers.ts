@@ -20,6 +20,7 @@ export function testConfig(logsDir: string, overrides: Partial<Config> = {}): Co
         logsDir,
         messagesPerFile: 3,
         backfillMessagesPerChat: 250,
+        syncIntervalMinutes: 15,
         mediaTypes: new Set(MEDIA_TYPES_ALL),
         maxMediaSizeMb: 100,
 

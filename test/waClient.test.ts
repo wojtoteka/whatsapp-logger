@@ -3,7 +3,16 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { log } from '../src/log';
-import { checkStore, findChrome, healthLine, waitForContacts } from '../src/waClient';
+import {
+    checkStore,
+    clearFullHistoryScan,
+    findChrome,
+    healthLine,
+    prepareFullHistoryScan,
+    readFullHistoryBatch,
+    waitForContacts,
+} from '../src/waClient';
+import { messageKey } from '../src/identity';
 import type { WaClient } from '../src/types';
 import { withTempDir } from './helpers';
 
@@ -32,6 +41,66 @@ function pageWithStore(store: unknown, onCall?: () => void): WaClient {
 function collection(size: number): { getModelsArray: () => unknown[] } {
     return { getModelsArray: () => new Array<unknown>(size).fill(null) };
 }
+
+test('pełna historia jest przekazywana z WhatsApp Store do Node w paczkach', async () => {
+    const chatId = '5550100@c.us';
+    const model = (id: string, timestamp: number) => ({
+        id: { _serialized: id, id, remote: chatId, fromMe: false },
+        t: timestamp,
+        from: chatId,
+        to: 'me@c.us',
+        type: 'chat',
+        body: id,
+    });
+    const messages = [model('newer', 20)];
+    const older = model('older', 10);
+    let loads = 0;
+    const chat = { msgs: { getModelsArray: () => messages } };
+    const target = globalThis as unknown as Record<string, unknown>;
+    const savedWindow = target.window;
+    target.window = {
+        Store: {
+            ConversationMsgs: {
+                async loadEarlierMsgs() {
+                    loads++;
+                    if (loads > 1) return [];
+                    messages.unshift(older);
+                    return [older];
+                },
+            },
+        },
+        WWebJS: {
+            async getChat() {
+                return chat;
+            },
+            getMessageModel(value: unknown) {
+                return value;
+            },
+        },
+    };
+    const client = {
+        pupPage: {
+            async evaluate<T>(fn: (...args: never[]) => T, ...args: unknown[]): Promise<T> {
+                return await (fn as (...values: unknown[]) => T)(...args);
+            },
+        },
+    } as unknown as WaClient;
+
+    try {
+        assert.deepEqual(await prepareFullHistoryScan(client, chatId), {
+            supported: true,
+            total: 2,
+        });
+        const first = await readFullHistoryBatch(client, chatId, 0, 1);
+        const second = await readFullHistoryBatch(client, chatId, 1, 1);
+        assert.deepEqual(first.map(messageKey), ['older']);
+        assert.deepEqual(second.map(messageKey), ['newer']);
+        await clearFullHistoryScan(client, chatId);
+    } finally {
+        if (savedWindow === undefined) delete target.window;
+        else target.window = savedWindow;
+    }
+});
 
 /** Store w komplecie, tak jak wygląda po pełnym wstrzyknięciu. */
 function fullStore(contacts: number, chats: number): Record<string, unknown> {
