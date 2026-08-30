@@ -46,6 +46,12 @@ export function testConfig(logsDir: string, overrides: Partial<Config> = {}): Co
         panelHost: '127.0.0.1',
         panelPort: 3000,
 
+        tauEnabled: false,
+        tauProviderNumber: '18002428478',
+        tauTimeoutSeconds: 120,
+        tauMaxMessages: 200,
+        tauMaxContextChars: 40000,
+
         chromePath: null,
         headless: true,
         logLevel: 'error',

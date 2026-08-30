@@ -54,6 +54,16 @@ export interface Config {
     panelHost: string;
     panelPort: number;
 
+    /** Prywatny asystent ?tau korzystający z numeru ChatGPT w WhatsAppie. */
+    tauEnabled: boolean;
+    /** Numer providera bez plusa, spacji ani myślników. */
+    tauProviderNumber: string;
+    tauTimeoutSeconds: number;
+    /** Nigdy więcej niż 200 tekstowych wiadomości. */
+    tauMaxMessages: number;
+    /** Dodatkowy limit rozmiaru pojedynczego requestu WhatsApp. */
+    tauMaxContextChars: number;
+
     chromePath: string | null;
     headless: boolean;
     logLevel: LogLevel;
@@ -203,6 +213,11 @@ const KNOWN_KEYS = new Set([
     'PANEL_ENABLED',
     'PANEL_HOST',
     'PANEL_PORT',
+    'TAU_ENABLED',
+    'TAU_PROVIDER_NUMBER',
+    'TAU_TIMEOUT_SECONDS',
+    'TAU_MAX_MESSAGES',
+    'TAU_MAX_CONTEXT_CHARS',
     'CHROME_PATH',
     'HEADLESS',
     'LOG_LEVEL',
@@ -283,6 +298,21 @@ export function loadConfig(rootDir: string, env: Env = process.env): LoadResult 
         panelHost: readText(env, 'PANEL_HOST', '127.0.0.1'),
         panelPort: readNumber(env, 'PANEL_PORT', 3000, warnings, { min: 1, max: 65535 }),
 
+        tauEnabled: readBool(env, 'TAU_ENABLED', false, warnings),
+        tauProviderNumber: readText(env, 'TAU_PROVIDER_NUMBER', '18002428478').replace(/\D/g, ''),
+        tauTimeoutSeconds: readNumber(env, 'TAU_TIMEOUT_SECONDS', 120, warnings, {
+            min: 10,
+            max: 600,
+        }),
+        tauMaxMessages: readNumber(env, 'TAU_MAX_MESSAGES', 200, warnings, {
+            min: 1,
+            max: 200,
+        }),
+        tauMaxContextChars: readNumber(env, 'TAU_MAX_CONTEXT_CHARS', 40000, warnings, {
+            min: 2000,
+            max: 55000,
+        }),
+
         chromePath: raw(env, 'CHROME_PATH'),
         headless: readBool(env, 'HEADLESS', true, warnings),
         logLevel: readLogLevel(env, warnings),
@@ -294,6 +324,9 @@ export function loadConfig(rootDir: string, env: Env = process.env): LoadResult 
     }
     if (config.discordPingUserId && !config.discordWebhookUrl) {
         warnings.push('DISCORD_PING_USER_ID jest ustawione, ale bez DISCORD_WEBHOOK_URL nic nie wyśle');
+    }
+    if (config.tauEnabled && config.tauProviderNumber.length < 8) {
+        warnings.push('TAU_PROVIDER_NUMBER nie wygląda na pełny numer międzynarodowy - ?tau nie zadziała');
     }
     // Adres podaje się samą nazwą albo samym IP. "http://" z przodu czy
     // ":3000" na końcu wygląda naturalnie, ale Next tego nie przyjmie

@@ -79,3 +79,16 @@ test('brak folderu archiwum jest jednoznacznym błędem', async () => {
         assert.match(result.issues[0]?.message ?? '', /nie istnieje/);
     });
 });
+
+test('kontrola archiwum ignoruje techniczną kolejkę ?tau', async () => {
+    await withTempDir(async (dir) => {
+        await fs.mkdir(path.join(dir, '_tau', 'requests'), { recursive: true });
+        await fs.writeFile(path.join(dir, '_tau', 'requests', 'job.json'), '{}', 'utf8');
+
+        const result = await checkArchive(dir);
+
+        assert.equal(result.chats, 0);
+        assert.equal(result.errors, 0, JSON.stringify(result.issues));
+        assert.equal(result.warnings, 0, JSON.stringify(result.issues));
+    });
+});

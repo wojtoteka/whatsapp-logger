@@ -59,6 +59,17 @@ test('zdjęcia profilowe i pliki stanu przeżywają kasowanie', async () => {
     });
 });
 
+test('techniczna kolejka ?tau nie podlega retencji wiadomości', async () => {
+    await withTempDir(async (dir) => {
+        const request = path.join(dir, '_tau', 'requests', 'job.json');
+        await fileAged(request, 900);
+
+        await runRetention(dir, 180);
+
+        assert.equal(await exists(request), true);
+    });
+});
+
 test('relacje leżą o poziom głębiej i też podlegają kasowaniu', async () => {
     await withTempDir(async (dir) => {
         await fileAged(path.join(dir, 'Statusy', 'Kontakt', 'messages_0001.html'), 200);

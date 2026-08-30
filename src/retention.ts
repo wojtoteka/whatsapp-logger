@@ -2,7 +2,7 @@
 //
 // Po RETENTION_DAYS dniach znikają pliki HTML z wiadomościami i pobrane
 // media. Wiek liczymy z daty modyfikacji pliku. Zdjęcia profilowe
-// (_avatars) i pliki stanu (_state.json) zostają - stan trzyma wiadomości,
+// (_avatars, _tau) i pliki stanu (_state.json) zostają - stan trzyma wiadomości,
 // które jeszcze nie wypełniły partii, a te kasuje osobno archiwum.
 
 import fs from 'node:fs/promises';
@@ -12,7 +12,7 @@ import { STATUS_DIR } from './statuses';
 import { formatBytes, listDirents } from './util';
 
 /** Foldery, do których kasowanie w ogóle nie wchodzi. */
-const KEEP_DIRS = new Set(['_avatars']);
+const KEEP_DIRS = new Set(['_avatars', '_tau']);
 
 /** Pliki, które zostają niezależnie od wieku. */
 const KEEP_FILES = new Set(['_state.json']);

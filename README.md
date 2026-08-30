@@ -15,6 +15,7 @@ Projekt jest przeznaczony do tworzenia kopii własnych rozmów. Korzysta z nieof
 - obsługa wiadomości z zabezpieczonych czatów;
 - automatyczne ponowienie pracy po przejściowym rozłączeniu lub awarii;
 - retencja, czyli opcjonalne usuwanie starych wiadomości i mediów;
+- opcjonalny prywatny asystent `?tau` z formularzem w panelu;
 - pliki HTML do otwierania bez panelu oraz dane JSON wykorzystywane przez panel;
 - narzędzie sprawdzające spójność całego archiwum.
 
@@ -121,6 +122,44 @@ Pierwsze polecenie sprawdza połączenie i tworzy potrzebne tabele. Drugie tworz
 
 Po zakończeniu konfiguracji zwykłe `npm start` uruchamia logger i panel razem. Przy pierwszym starcie panel może potrzebować chwili na zbudowanie wersji produkcyjnej.
 
+## Prywatny asystent `?tau`
+
+Funkcja jest domyślnie wyłączona. Włącza się ją świadomie w głównym `.env`:
+
+```dotenv
+TAU_ENABLED=true
+```
+
+Providerem jest zwykły chat WhatsApp z numerem `+1 800 242 8478`. Po starcie logger sprawdza przez `getNumberId()`, czy bieżąca sesja widzi ten numer. Przykład polecenia wysłanego przez właściciela w rozmowie:
+
+```text
+?tau o czym ostatnio rozmawialiśmy?
+```
+
+Logger przekazuje wyłącznie ostatnie maksymalnie 200 wiadomości typu tekstowego z tej rozmowy. Pomija multimedia, wcześniejsze polecenia `?tau`, wcześniejsze odpowiedzi `[TAU]` i inne czaty. Odpowiedź trafia do własnego chatu właściciela, nigdy automatycznie do analizowanego rozmówcy.
+
+Wiadomość z `?tau` wysłana przez inną osobę zostaje tylko zarchiwizowana. Backend wymaga jednocześnie `message.fromMe === true` oraz `message.id.fromMe === true`. Własne wiadomości generowane przez aplikację są dodatkowo oznaczane i nie mogą uruchomić parsera ponownie.
+
+Z własnego chatu można wskazać inną rozmowę numerem albo nazwą:
+
+```text
+?tau +48123456789 o czym ostatnio rozmawialiśmy?
+?tau Natalia podsumuj ostatnie ustalenia
+```
+
+Wyszukiwanie najpierw sprawdza dokładny numer i nazwę, potem wariant bez wielkości liter i ozdobników, a na końcu ostrożne dopasowanie przybliżone. Niejednoznaczny wynik nie wysyła żadnego kontekstu do providera.
+
+Na stronie rozmowy w panelu jest ten sam asystent. Chroniony sesją endpoint zapisuje do kolejki tylko identyfikator folderu i pytanie. Wspólny proces loggera buduje kontekst w pamięci i wykonuje zapytanie; panel pokazuje stany wysyłania, oczekiwania, odpowiedzi i błędu.
+
+Ważne ograniczenia:
+
+- numer WhatsApp nie jest API i nie obsługuje prawdziwych ról `system`, `user` i `assistant`;
+- centralna instrukcja bezpieczeństwa jest wysyłana jako zwykły tekst, a nie jako techniczny system prompt;
+- requesty są wykonywane pojedynczo, a odpowiedź musi zawierać unikalny marker konkretnego zapytania; wiadomości bez markera są ignorowane;
+- nie ma technicznej gwarancji, że provider nie wykorzysta własnej wcześniejszej historii chatu. Każdy request zawiera pełny bieżący kontekst i polecenie ignorowania starej historii, ale jest to izolacja best-effort;
+- polecenie wpisane w zwykłej rozmowie zostało już wysłane rozmówcy, zanim `message_create` dotrze do loggera. Do całkowicie prywatnych pytań użyj własnego chatu albo panelu;
+- awaria i timeout AI nie zatrzymują archiwizacji. Po restarcie przerwanego zadania panel nie wysyła kontekstu ponownie automatycznie.
+
 ## Przydatne polecenia
 
 | Polecenie | Działanie |
@@ -211,6 +250,11 @@ Pełny wzór z komentarzami znajduje się w `.env.example`. Pusta wartość ozna
 | `PANEL_ENABLED` | `true` | Uruchamia panel razem z loggerem. |
 | `PANEL_HOST` | `127.0.0.1` | Adres nasłuchiwania panelu. |
 | `PANEL_PORT` | `3000` | Port panelu. |
+| `TAU_ENABLED` | `false` | Włącza polecenie `?tau` i formularz w panelu. |
+| `TAU_PROVIDER_NUMBER` | `18002428478` | Numer providera zapisany wyłącznie cyframi. |
+| `TAU_TIMEOUT_SECONDS` | `120` | Limit oczekiwania na oznaczoną odpowiedź. |
+| `TAU_MAX_MESSAGES` | `200` | Maksymalna liczba tekstowych wiadomości w kontekście, nie więcej niż 200. |
+| `TAU_MAX_CONTEXT_CHARS` | `40000` | Dodatkowy limit znaków kontekstu w jednym requeście. |
 | `DB_ENABLED` | `false` | Włącza dodatkowy zapis wiadomości do bazy SQL. Konta panelu korzystają z bazy niezależnie od tej opcji. |
 | `DB_HOST`, `DB_PORT` | `127.0.0.1`, `3306` | Adres i port bazy. |
 | `DB_USER`, `DB_PASSWORD`, `DB_NAME` | - | Dane dostępowe do bazy. |
@@ -242,6 +286,10 @@ logs/
 ├── _avatars/
 │   ├── identyfikator-kontaktu/
 │   └── _historia.json
+├── _tau/
+│   ├── requests/
+│   ├── processing/
+│   └── results/
 ├── _czaty.json
 ├── _bledy.json
 └── _kasowanie.log
@@ -251,6 +299,7 @@ logs/
 - `messages_XXXX.json` zawierają te same partie dla panelu;
 - `_state.json` przechowuje jeszcze niezamkniętą partię i identyfikatory do deduplikacji;
 - `_czaty.json` mapuje identyfikatory WhatsAppa na foldery archiwum;
+- `_tau` zawiera krótkotrwałą kolejkę panelu bez kopii kontekstu rozmowy;
 - `media` zawiera pobrane załączniki.
 
 ## Kontrola archiwum
@@ -308,6 +357,8 @@ Hook jest dodatkowym zabezpieczeniem, a nie zamiennikiem sprawdzenia zmian przed
 | Panel pokazuje błąd konfiguracji | Sprawdź `AUTH_SECRET` w `panel/.env`. |
 | Nie można zalogować się do panelu | `npm start -- --baza` sprawdzi bazę, a `npm start -- --uzytkownik <login>` ustawi hasło ponownie. Konsola panelu rozróżnia brak konta, niepasujące hasło i błąd SQL. |
 | Panel widzi inny lub pusty folder | Sprawdź `LOGS_DIR`; launcher przekazuje panelowi ścieżkę używaną przez logger. |
+| `?tau` jest wyłączone | Ustaw `TAU_ENABLED=true` w głównym `.env` i uruchom ponownie logger oraz panel. |
+| `?tau` kończy się timeoutem | Provider nie zwrócił wymaganego markera. Sprawdź ręcznie, czy numer odpowiada w tej sesji WhatsApp. |
 | Potrzebne są szczegóły awarii | Zajrzyj do `logs/_bledy.json` albo ustaw `LOG_LEVEL=debug`. |
 
 ## Uwagi

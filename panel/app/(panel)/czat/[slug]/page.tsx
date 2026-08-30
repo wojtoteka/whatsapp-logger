@@ -6,6 +6,8 @@ import { Awatar } from '@/components/Awatar';
 import { MaterialIcon } from '@/components/MaterialIcon';
 import { Wiadomosc } from '@/components/Wiadomosc';
 import { Odswiezanie } from '@/components/Odswiezanie';
+import { TauPanel } from '@/components/TauPanel';
+import { tauEnabled } from '@/lib/tau';
 
 export const dynamic = 'force-dynamic';
 
@@ -59,6 +61,8 @@ export default async function StronaCzatu({ params, searchParams }: Props) {
                     </p>
                 </div>
             </header>
+
+            {!chat.isStatus && <TauPanel folder={folder} enabled={tauEnabled()} />}
 
             {messages.length === 0 ? (
                 <div className="empty-state">

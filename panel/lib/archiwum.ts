@@ -22,7 +22,7 @@ import type {
 export const STATUS_DIR = 'Statusy';
 
 /** Foldery techniczne, które nie są czatem. */
-const NOT_A_CHAT = new Set(['_avatars']);
+const NOT_A_CHAT = new Set(['_avatars', '_tau']);
 
 /**
  * Ścieżka do archiwum. Domyślnie logs/ obok panelu.
@@ -108,11 +108,15 @@ async function chatSources(folder: string): Promise<string[]> {
     try {
         files = (await fs.readdir(dir))
             .filter((f) => /^messages_\d+\.json$/.test(f))
-            .sort();
+            .sort((a, b) => batchNumber(a) - batchNumber(b));
     } catch {
         return [];
     }
     return files;
+}
+
+function batchNumber(file: string): number {
+    return Number.parseInt(/^messages_(\d+)\.json$/.exec(file)?.[1] ?? '0', 10);
 }
 
 async function readSource(folder: string, file: string): Promise<ArchivedMessage[]> {

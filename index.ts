@@ -21,6 +21,7 @@ import type { UnlockResult } from './src/lockedChats';
 import { Notifier } from './src/notify';
 import { runRetention } from './src/retention';
 import { EXIT_AUTH_FAILURE, EXIT_RESTART } from './src/restart';
+import { TauService } from './src/tauService';
 import type { WaClient, WaMessage } from './src/types';
 import { ensureDirSync, formatHours } from './src/util';
 import { createClient, healthLine, waitForContacts } from './src/waClient';
@@ -103,8 +104,9 @@ async function main(): Promise<void> {
     const notifier = new Notifier(config);
     const client = createClient(config, ROOT_DIR);
     const archive = new Archive(config, client, config.dbEnabled ? db : null);
+    const tau = new TauService(config, client, archive);
 
-    const runtime = new Runtime(config, client, archive, notifier, db, backfillAll);
+    const runtime = new Runtime(config, client, archive, notifier, db, tau, backfillAll);
     runtime.wire();
 
     log.info('Łączę z WhatsApp Web...');
@@ -134,6 +136,7 @@ class Runtime {
         private readonly archive: Archive,
         private readonly notifier: Notifier,
         private readonly db: Database,
+        private readonly tau: TauService,
         /** Jednorazowy tryb, który może założyć foldery dla wszystkich czatów. */
         private readonly backfillAll: boolean,
     ) {}
@@ -267,6 +270,8 @@ class Runtime {
             await this.shutdown('polecenie --nadrob-wszystko', failed ? 1 : 0);
             return;
         }
+
+        await this.tau.start();
 
         log.info('✓ Archiwizuję wiadomości. Zatrzymanie: Ctrl+C.');
         log.blank();
@@ -414,13 +419,23 @@ class Runtime {
     private wireMessages(): void {
         // Odebrane
         this.client.on('message', (message) => {
-            void this.archive.save(message as WaMessage);
+            void this.handleIncoming(message as WaMessage).catch((error: unknown) => {
+                log.error('Błąd dodatkowej obsługi odebranej wiadomości', error, {
+                    stage: 'message extras',
+                });
+            });
         });
 
         // Wysłane przez Ciebie. To zdarzenie leci również dla odebranych,
         // stąd filtr fromMe - inaczej każda wiadomość byłaby zapisana dwa razy.
         this.client.on('message_create', (message) => {
-            if (message.fromMe) void this.archive.save(message as WaMessage);
+            if (message.fromMe) {
+                void this.handleOutgoing(message as WaMessage).catch((error: unknown) => {
+                    log.error('Błąd dodatkowej obsługi wysłanej wiadomości', error, {
+                        stage: 'message extras',
+                    });
+                });
+            }
         });
 
         // Skasowane "dla wszystkich" - "before" to jeszcze pełna treść.
@@ -434,6 +449,18 @@ class Runtime {
         this.client.on('message_revoke_me', (message) => {
             void this.archive.markDeleted(message as WaMessage);
         });
+    }
+
+    private async handleIncoming(message: WaMessage): Promise<void> {
+        await this.archive.save(message);
+        await this.tau.acceptIncoming(message);
+    }
+
+    private async handleOutgoing(message: WaMessage): Promise<void> {
+        // Polecenie jest analizowane dopiero po trwałym wejściu do kolejki
+        // archiwum. Awaria AI nie może zrobić dziury w podstawowym zapisie.
+        await this.archive.save(message);
+        await this.tau.acceptOutgoing(message);
     }
 
     // ── Przeglądy cykliczne ──────────────────────────────────────────────
@@ -549,6 +576,12 @@ class Runtime {
         this.clearReadyFallback();
 
         try {
+            await this.tau.stop();
+        } catch (err) {
+            log.quiet(err, { stage: 'zamykanie tau' });
+        }
+
+        try {
             await this.archive.flushAll();
             log.info('✓ Wszystko zapisane.');
         } catch (err) {
@@ -602,6 +635,13 @@ function printConfig(config: Config, envFileFound: boolean): void {
     log.info(`  Przeglądarka             ${config.chromePath ?? '(wykrywana automatycznie)'}`);
     log.info(`  Okno przeglądarki        ${config.headless ? 'ukryte' : 'widoczne'}`);
     log.info(`  Poziom logów             ${config.logLevel}`);
+    log.info(
+        `  ?tau                     ${
+            config.tauEnabled
+                ? `tak, provider +${config.tauProviderNumber}, timeout ${config.tauTimeoutSeconds} s`
+                : 'wyłączone'
+        }`,
+    );
     log.info('');
     log.info(`  Hasło zabezpieczonych czatów   ${secret(config.lockedChatPassword)}`);
     log.info(`  Hasło do bazy                  ${secret(config.dbPassword)}`);

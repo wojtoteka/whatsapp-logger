@@ -198,6 +198,15 @@ export class Archive {
         return this.config.logsDir;
     }
 
+    /**
+     * Bieżąca partia dla ?tau. Może być o kilka sekund świeższa niż
+     * _state.json, bo normalny zapis stanu jest celowo ograniczany czasowo.
+     */
+    pendingMessagesFor(folder: string): readonly ArchivedMessage[] | null {
+        const state = [...this.states.values()].find((candidate) => candidate.safeName === folder);
+        return state ? [...state.pending] : null;
+    }
+
     /** Aktualizuje listę zwróconą przez WhatsApp Web; niczego nie zapisuje na dysk. */
     setLockedChatIds(ids: readonly string[]): void {
         this.lockedChatIds.clear();
@@ -1564,7 +1573,7 @@ export class Archive {
         const files: string[] = [];
 
         for (const entry of await listDirents(this.config.logsDir)) {
-            if (!entry.isDirectory() || entry.name === '_avatars') continue;
+            if (!entry.isDirectory() || entry.name === '_avatars' || entry.name === '_tau') continue;
 
             const dir = path.join(this.config.logsDir, entry.name);
             const direct = path.join(dir, '_state.json');

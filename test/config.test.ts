@@ -28,6 +28,23 @@ test('bez pliku .env program dostaje komplet wartości domyślnych', async () =>
         assert.equal(config.saveProfilePics, true);
         assert.equal(config.logsDir, path.resolve(dir, './logs'));
         assert.equal(config.lockedChatPassword, '');
+        assert.equal(config.tauEnabled, false);
+        assert.equal(config.tauProviderNumber, '18002428478');
+    });
+});
+
+test('?tau jest opcjonalne, normalizuje numer i nie pozwala przekroczyć 200 wiadomości', async () => {
+    await withEnvFile('TAU_ENABLED=true\nTAU_PROVIDER_NUMBER=+1 800 242 8478\nTAU_MAX_MESSAGES=999\n', async (dir) => {
+        const { config, warnings } = loadConfig(dir, {
+            TAU_ENABLED: 'true',
+            TAU_PROVIDER_NUMBER: '+1 800 242 8478',
+            TAU_MAX_MESSAGES: '999',
+        });
+
+        assert.equal(config.tauEnabled, true);
+        assert.equal(config.tauProviderNumber, '18002428478');
+        assert.equal(config.tauMaxMessages, 200);
+        assert.ok(warnings.some((warning) => warning.includes('TAU_MAX_MESSAGES')));
     });
 });
 

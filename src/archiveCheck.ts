@@ -75,7 +75,7 @@ async function checkChatIndex(root: string, result: ArchiveCheckResult): Promise
 async function findChatDirs(root: string): Promise<string[]> {
     const dirs: string[] = [];
     for (const entry of await dirents(root)) {
-        if (!entry.isDirectory() || entry.name === '_avatars') continue;
+        if (!entry.isDirectory() || entry.name === '_avatars' || entry.name === '_tau') continue;
         const full = path.join(root, entry.name);
 
         if (entry.name !== 'Statusy') {
