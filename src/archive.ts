@@ -100,11 +100,18 @@ const SEEN_ID_LIMIT = 10_000;
 const REPORTED_CHAT_FAILURES = 3;
 
 /**
- * Przegląd zaległych plików dzieli stronę WhatsApp Weba z bieżącą pracą,
- * więc jedno podejście nie może w niej siedzieć długo. Plik, który nie
- * zdążył, wraca w kolejce przy następnym przeglądzie.
+ * Ile przegląd zaległości czeka na jeden plik.
+ *
+ * Pięć sekund było za mało na to, po co ta kolejka w ogóle istnieje.
+ * Zaległy plik to prawie zawsze media wygasłe na serwerze: prośba
+ * "rmrReason: 1" idzie do telefonu, a ten musi je wysłać jeszcze raz -
+ * kilkanaście do kilkudziesięciu sekund przy zdjęciu. Przegląd zdążył
+ * poprosić i odejść, zanim przyszła odpowiedź, więc co sześć godzin
+ * powtarzał tę samą prośbę i po ósmym podejściu wyrzucał plik z kolejki.
+ * Tutaj nikt nie czeka na wynik, a limit wpisów na przebieg trzyma cały
+ * przegląd w rozsądnych ramach - więc czekamy tyle, ile trzeba.
  */
-const MEDIA_RETRY_STAGE_WAIT_MS = 5_000;
+const MEDIA_RETRY_STAGE_WAIT_MS = 45_000;
 
 /**
  * syncHistory() 1.34.6 potwierdza wysłanie żądania, nie otrzymanie danych.
@@ -1544,7 +1551,6 @@ export class Archive {
      */
     async retryFailedMedia(limit = 10): Promise<MediaRetryStats> {
         const stats: MediaRetryStats = { tried: 0, recovered: 0, waiting: 0 };
-        if (typeof this.client.getMessageById !== 'function') return stats;
 
         for (const entry of await this.mediaRetry.due(limit)) {
             stats.tried++;
@@ -1581,7 +1587,8 @@ export class Archive {
         const place = this.chatPlace(entry.chatId);
         if (!place) return 'bez-miejsca';
 
-        const message = (await this.client.getMessageById(entry.messageId)) as WaMessage | null;
+        const isStatus = isStatusChat(entry.chatId);
+        const message = await this.findForRetry(entry.messageId, isStatus);
         if (!message?.hasMedia) return 'bez-pliku';
 
         const media = await this.media.download(
@@ -1589,7 +1596,7 @@ export class Archive {
             {
                 mediaDir: place.mediaDir,
                 chatDir: place.chatDir,
-                isStatus: isStatusChat(entry.chatId),
+                isStatus,
                 label: place.name,
             },
             { waitForStageMs: MEDIA_RETRY_STAGE_WAIT_MS },
@@ -1607,6 +1614,35 @@ export class Archive {
 
         log.info(`Odzyskano plik w "${place.name}" (${entry.type}).`);
         return 'odzyskany';
+    }
+
+    /**
+     * Wiadomość do ponowienia - inną drogą dla relacji, inną dla rozmów.
+     *
+     * getMessageById() z biblioteki szuka wyłącznie w Store.Msg, a relacji
+     * tam nie ma: WhatsApp Web trzyma je w Store.Status. Dla każdej relacji
+     * z kolejki zwracało więc "nie ma takiej wiadomości", ponowienie liczyło
+     * kolejną nieudaną próbę i po ośmiu podejściach relacja wypadała
+     * z kolejki - żaden plik z relacji nie miał prawa się odzyskać.
+     *
+     * Przy okazji tłumi jeden znany wyjątek: getMessageById() rzuca "Invalid
+     * serialized message id", gdy identyfikator nie ma trzech ani czterech
+     * członów - a tak wyglądają klucze wiadomości bez _serialized. To nie
+     * jest awaria warta wpisu w dzienniku, tylko wiadomość nie do odzyskania.
+     */
+    private async findForRetry(messageId: string, isStatus: boolean): Promise<WaMessage | null> {
+        if (isStatus) {
+            const statuses = (await listStatusMessages(this.client)) ?? [];
+            return statuses.find((candidate) => messageKey(candidate) === messageId) ?? null;
+        }
+
+        if (typeof this.client.getMessageById !== 'function') return null;
+        try {
+            return (await this.client.getMessageById(messageId)) as WaMessage | null;
+        } catch (err) {
+            if (/serialized message id/i.test(String((err as Error)?.message ?? ''))) return null;
+            throw err;
+        }
     }
 
     /** Folder czatu z pamięci albo ze spisu - bez otwierania pełnego stanu. */

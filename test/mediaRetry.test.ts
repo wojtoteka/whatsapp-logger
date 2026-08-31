@@ -67,7 +67,9 @@ test('plik, którego WhatsApp nie oddał, zostaje odzyskany przy kolejnym przegl
         const batchFile = path.join(dir, '5550100', 'messages_0001.json');
         const first = JSON.parse(await fs.readFile(batchFile, 'utf8')) as BatchFile;
         assert.equal(first.messages[0]?.mediaPath, null);
-        assert.equal(first.messages[0]?.mediaSkipped?.reason, 'nie udało się pobrać pliku');
+        // Notatka zaczyna się tak, jak rozpoznaje ją isRecoverableMediaFailure,
+        // a dalej niesie powód prosto z przeglądarki - stąd sam przedrostek.
+        assert.match(first.messages[0]?.mediaSkipped?.reason ?? '', /^nie udało się pobrać pliku/);
 
         // Telefon wysłał plik ponownie - ta sama wiadomość, tym razem z danymi.
         const znowu = fakeMessage({
@@ -124,5 +126,45 @@ test('bez pliku po stronie WhatsAppa wiadomość zostaje w kolejce na kolejny ra
         const queue = await new MediaRetryQueue(dir).due(10);
         assert.equal(queue[0]?.messageId, 'foto');
         assert.equal(queue[0]?.attempts, 1);
+    });
+});
+
+test('relacja z kolejki jest szukana wśród statusów, nie przez getMessageById', async () => {
+    await withTempDir(async (dir) => {
+        const client = fakeClient();
+        const archive = new Archive(testConfig(dir, { messagesPerFile: 1 }), client);
+
+        // Relacja z niepobranym plikiem trafia do kolejki tak samo jak zdjęcie
+        // z rozmowy - jej klucz czatu ma tylko przedrostek "status:".
+        await archive.save(
+            fakeMessage({
+                id: 'relacja-1',
+                rawStatusId: true,
+                from: '5550100@c.us',
+                type: 'image',
+                hasMedia: true,
+            }),
+        );
+
+        let pytanoOWiadomosc = false;
+        let pytanoOStatusy = false;
+        const stub = client as unknown as Record<string, unknown>;
+        // getMessageById() zagląda wyłącznie do Store.Msg, gdzie relacji nie ma.
+        // Sięgnięcie po nie dla relacji było właśnie tym błędem: każde ponowienie
+        // wracało z pustką i po ośmiu podejściach relacja wypadała z kolejki.
+        stub.getMessageById = async (): Promise<unknown> => {
+            pytanoOWiadomosc = true;
+            return null;
+        };
+        stub.pupPage = {
+            async evaluate(): Promise<unknown> {
+                pytanoOStatusy = true;
+                return [];
+            },
+        };
+
+        assert.deepEqual(await archive.retryFailedMedia(), { tried: 1, recovered: 0, waiting: 1 });
+        assert.equal(pytanoOStatusy, true, 'ponowienie zagląda do kolekcji relacji');
+        assert.equal(pytanoOWiadomosc, false, 'i nie pyta o relację jak o zwykłą wiadomość');
     });
 });

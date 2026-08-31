@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { downloadMediaFromStore, MediaDownloader } from '../src/media';
+import { downloadMediaFromStore, isRecoverableMediaFailure, MediaDownloader } from '../src/media';
 import type { MediaTarget } from '../src/media';
 import type { WaMessage } from '../src/types';
 import { fakeMessage, testConfig, withTempDir } from './helpers';
@@ -142,7 +142,7 @@ function fakeFileReader(base64: string | null): new () => Record<string, unknown
 test('gotowy plik z przeglądarki wystarczy - bez DownloadManagera', async () => {
     // Tak zdjęcie trafiało do archiwum mimo braku directPath i mediaKey,
     // na których kończyło się notatką "nie udało się pobrać pliku".
-    const media = await withFakeStore(
+    const result = await withFakeStore(
         {
             FileReader: fakeFileReader('QUJD'),
             Store: {
@@ -162,12 +162,13 @@ test('gotowy plik z przeglądarki wystarczy - bez DownloadManagera', async () =>
         (message) => downloadMediaFromStore(message, { waitForStageMs: 0 }),
     );
 
-    assert.equal(media?.data, 'QUJD');
-    assert.equal(media?.mimetype, 'image/jpeg');
+    assert.equal(result.media?.data, 'QUJD');
+    assert.equal(result.media?.mimetype, 'image/jpeg');
+    assert.equal(result.why, null);
 });
 
 test('brak DownloadManagera kończy się pustką, a nie wyjątkiem', async () => {
-    const media = await withFakeStore(
+    const result = await withFakeStore(
         {
             FileReader: fakeFileReader(null),
             Store: {
@@ -182,5 +183,97 @@ test('brak DownloadManagera kończy się pustką, a nie wyjątkiem', async () =>
         (message) => downloadMediaFromStore(message, { waitForStageMs: 0 }),
     );
 
-    assert.equal(media, null);
+    assert.equal(result.media, null);
+    assert.match(result.why ?? '', /DownloadManager/);
+});
+
+// ── Powód niepowodzenia ──────────────────────────────────────────────────
+//
+// Dopóki każda porażka wracała jako samo null, w archiwum stała notatka
+// "nie udało się pobrać pliku" i nie dało się z niej wyczytać, czy plik
+// wygasł, czy serwer nie ma dostępu do mediów WhatsAppa.
+
+test('wygasłe media mówią wprost, że czekają na telefon', async () => {
+    const result = await withFakeStore(
+        {
+            FileReader: fakeFileReader(null),
+            Store: {
+                Msg: {
+                    get: () => ({
+                        id: { _serialized: 'z-plikiem' },
+                        // Telefon nie zdążył odesłać pliku w oknie oczekiwania.
+                        mediaData: { mediaStage: 'REUPLOADING' },
+                        downloadMedia: async () => undefined,
+                    }),
+                },
+            },
+        },
+        (message) => downloadMediaFromStore(message, { waitForStageMs: 0 }),
+    );
+
+    assert.equal(result.media, null);
+    assert.equal(result.stage, 'REUPLOADING');
+    assert.match(result.why ?? '', /telefon/);
+});
+
+test('odmowa serwera mediów trafia do powodu razem z kodem odpowiedzi', async () => {
+    const result = await withFakeStore(
+        {
+            FileReader: fakeFileReader(null),
+            Store: {
+                Msg: {
+                    get: () => ({
+                        id: { _serialized: 'z-plikiem' },
+                        mediaData: { mediaStage: 'RESOLVED' },
+                        directPath: '/v/t62.7118-24/plik.enc',
+                        mediaKey: 'klucz',
+                    }),
+                },
+                DownloadManager: {
+                    downloadAndMaybeDecrypt: async () => {
+                        throw Object.assign(new Error('Not Found'), { status: 404 });
+                    },
+                },
+            },
+        },
+        (message) => downloadMediaFromStore(message, { waitForStageMs: 0 }),
+    );
+
+    assert.equal(result.media, null);
+    assert.match(result.why ?? '', /404/);
+});
+
+test('wiadomość poza pamięcią przeglądarki jest nazwana po imieniu', async () => {
+    const result = await withFakeStore(
+        { FileReader: fakeFileReader(null), Store: { Msg: { get: () => null } } },
+        (message) => downloadMediaFromStore(message, { waitForStageMs: 0 }),
+    );
+
+    assert.equal(result.media, null);
+    assert.match(result.why ?? '', /pamięci przeglądarki/);
+});
+
+test('powód z przeglądarki wchodzi do notatki w archiwum', async () => {
+    await withTempDir(async (dir) => {
+        const reason = await withFakeStore(
+            {
+                FileReader: fakeFileReader(null),
+                Store: { Msg: { get: () => null } },
+            },
+            async (message) => {
+                const result = await new MediaDownloader(testConfig(dir)).download(
+                    message,
+                    target(dir),
+                    { waitForStageMs: 0 },
+                );
+                return result.skipped?.reason ?? '';
+            },
+        );
+
+        // Notatka nadal zaczyna się tak, jak sprawdza isRecoverableMediaFailure,
+        // więc plik wciąż trafia do kolejki ponowień - ale mówi już, co się stało.
+        assert.match(reason, /^nie udało się pobrać pliku: /);
+        assert.match(reason, /pamięci przeglądarki/);
+        assert.equal(isRecoverableMediaFailure(reason), true);
+    });
 });

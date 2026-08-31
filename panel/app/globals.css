@@ -130,7 +130,12 @@ a:hover {
     align-items: center;
     gap: 8px;
     margin-left: auto;
-    flex-wrap: wrap;
+    /* Zakładki trzymają się jednego wiersza. Przy zawijaniu pigułka z kontem
+       spadała pod "Rozmowy" i "Relacje" jako samotna trzecia linia dosunięta
+       do prawej - pasek wyglądał wtedy na przekrzywiony. Zwężanie bierze na
+       siebie sama nazwa konta: ma wielokropek i max-width. Gdy zabraknie
+       miejsca, cała grupa i tak zjeżdża pod tytuł, bo zawija .masthead. */
+    flex-wrap: nowrap;
     min-width: 0;
 }
 .tabs form {
@@ -141,8 +146,10 @@ a:hover {
 .tab {
     display: inline-flex;
     align-items: center;
-    gap: 7px;
-    padding: 6px 15px;
+    gap: 8px;
+    /* Z prawej mniej marginesu niż z lewej: plakietka licznika ma własne
+       tło i sama w sobie wygląda na odsunięcie od krawędzi. */
+    padding: 5px 10px 5px 15px;
     border-radius: 18px;
     border: 1px solid var(--edge-strong);
     color: var(--dim);
@@ -163,14 +170,36 @@ a:hover {
     color: var(--deep);
     font-weight: 600;
 }
-/* Licznik miał wcześniej dosuwanie transformem, przez co siedział krzywo
-   względem etykiety. Wspólne wyśrodkowanie z .tab załatwia to samo uczciwie. */
+
+/* Licznik jest osobną plakietką, a nie liczbą dostawioną do etykiety.
+   Dwa różne stopnie pisma w jednym wierszu nie usiądą równo: wyśrodkowanie
+   rozjeżdża linię pisma, a wyrównanie do linii pisma rozjeżdża wysokości -
+   i licznik zawsze wygląda na przekrzywiony. Własne tło i stała wysokość
+   zdejmują ten wybór, bo plakietka jest wyśrodkowana jako całe pudełko.
+   Krój zostaje ten sam co w etykiecie; mono odstawało od reszty paska. */
 .tab .count {
-    font-family: var(--mono);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 21px;
+    height: 20px;
+    padding: 0 6px;
+    border-radius: 10px;
+    background: rgba(228, 237, 238, 0.1);
+    color: inherit;
     font-size: 11.5px;
+    font-weight: 600;
     line-height: 1;
-    opacity: 0.75;
     font-variant-numeric: tabular-nums;
+}
+.tab:hover .count {
+    background: rgba(63, 182, 168, 0.16);
+}
+/* Na turkusowym tle zakładki aktywnej plakietka musi być ciemna - jaśniejsza
+   od tła zlałaby się z nim w jedną plamę. */
+.tab[aria-current='page'] .count {
+    background: rgba(10, 26, 32, 0.22);
+    color: var(--deep);
 }
 
 .page-title {
@@ -803,6 +832,9 @@ a:hover {
     line-height: 1;
     cursor: pointer;
     max-width: min(240px, 42vw);
+    /* Bez licznika nie ma czego domykać z prawej - marginesy wracają
+       do symetrii, inaczej pigułka z kontem wyglądałaby na ściętą. */
+    padding-inline: 15px;
 }
 .tab.logout .login-name {
     display: block;

@@ -554,10 +554,11 @@ class Runtime {
         if (this.config.saveProfilePics) {
             what.push(`zdjęcia profilowe co ${this.config.avatarRefreshDays} dni`);
         }
-        if (what.length === 0) {
-            log.info('Przegląd: wyłączony.');
-            return;
-        }
+        // Zaległe pliki nie są opcją do wyłączenia - są naprawą tego, co już
+        // trafiło do archiwum z notatką zamiast zdjęcia. Wcześniej wisiały pod
+        // tym samym warunkiem co relacje i awatary, więc wyłączenie obu
+        // zatrzymywało również kolejkę ponowień i notatka zostawała na zawsze.
+        what.push('zaległe pliki');
 
         log.info(`Przegląd co ${formatHours(this.config.sweepCheckHours)}: ${what.join(', ')}.`);
 

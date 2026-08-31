@@ -213,11 +213,22 @@ Pełne nadrabianie oznacza całą historię udostępnioną bieżącej sesji What
 
 ## Pliki, których WhatsApp nie oddał od razu
 
-WhatsApp odmawia wydania pliku z powodów przejściowych: media wygasły na serwerze i czekają, aż telefon wyśle je ponownie (`REUPLOADING`), pobieranie dopiero ruszyło (`FETCHING`) albo łącze przycięło je w połowie. Wiadomość zostaje wtedy w archiwum z notatką w rodzaju „Nie zapisano pliku: zdjęcie, 102 KB. Powód: nie udało się pobrać pliku".
+WhatsApp odmawia wydania pliku z powodów przejściowych: media wygasły na serwerze i czekają, aż telefon wyśle je ponownie (`REUPLOADING`), pobieranie dopiero ruszyło (`FETCHING`) albo łącze przycięło je w połowie. Wiadomość zostaje wtedy w archiwum z notatką w rodzaju „Nie zapisano pliku: zdjęcie, 102 KB".
 
-Logger próbuje temu zapobiec na dwa sposoby. Przy zapisie czeka w przeglądarce na zakończenie pobierania zamiast poprzestawać na pustej odpowiedzi, prosi telefon o ponowne wysłanie wygasłego pliku i szuka wiadomości także przez `getMessagesById`, gdy nie ma jej już w pamięci strony.
+Notatka mówi też, **co dokładnie** poszło nie tak - inaczej jedno „nie udało się pobrać pliku" oznaczałoby jednocześnie wygasłe media, wiadomość poza pamięcią przeglądarki i serwer bez dostępu do `mmg.whatsapp.net`, a to są zupełnie różne sprawy:
 
-Jeżeli mimo to plik nie przyszedł, wiadomość trafia do `logs/_media_do_pobrania.json`. Przy każdym przeglądzie (`SWEEP_CHECK_HOURS`, domyślnie co 6 godzin) logger wraca do takich wiadomości, a po udanym pobraniu podmienia notatkę na plik w `messages_XXXX.json`, w odpowiadającym mu pliku HTML i w bazie. Odzyskane pliki są zliczane w konsoli:
+| Powód w notatce | Co się właściwie stało |
+| --- | --- |
+| `media wygasły i czekają, aż telefon wyśle je ponownie` | Plik nie leży już na serwerze WhatsAppa. Logger poprosił telefon o ponowne wysłanie; telefon nie zdążył albo był offline. Kolejka ponowień ma sens. |
+| `pobieranie nie skończyło się w N s` | Plik się ściąga, tylko wolniej niż okno oczekiwania. Zwykle odzyskuje się przy pierwszym ponowieniu. |
+| `serwer mediów WhatsAppa odpowiedział 404` | Adres `directPath` wygasł. Przy backfillu starej historii to stan normalny. |
+| `pobieranie z serwera mediów nie doszło do skutku: …` | Chromium nie dopchał się do serwera mediów. **Jeżeli powtarza się przy każdym pliku, przyczyna jest po stronie sieci serwera, a nie WhatsAppa** - to inny host niż `web.whatsapp.com`, więc samo działające połączenie z WhatsApp Web niczego nie dowodzi. |
+| `wiadomości nie ma już w pamięci przeglądarki` | Strona się przeładowała albo wiadomość wypadła ze Store. |
+| `WhatsApp nie ma już adresu ani klucza do tego pliku` | Brak `directPath`/`mediaKey` - plik przepadł bezpowrotnie. |
+
+Logger próbuje temu zapobiec na dwa sposoby. Przy zapisie czeka w przeglądarce na zakończenie pobierania zamiast poprzestawać na pustej odpowiedzi, prosi telefon o ponowne wysłanie wygasłego pliku i szuka wiadomości także przez `getMessagesById`, gdy nie ma jej już w pamięci strony. Na żywo czeka krótko (8 s), bo kolejka czatu stoi; w przeglądzie zaległości długo (45 s), bo tam nikt nie czeka, a tyle właśnie zajmuje telefonowi ponowne wysłanie zdjęcia.
+
+Jeżeli mimo to plik nie przyszedł, wiadomość trafia do `logs/_media_do_pobrania.json`. Przy każdym przeglądzie (`SWEEP_CHECK_HOURS`, domyślnie co 6 godzin) logger wraca do takich wiadomości, a po udanym pobraniu podmienia notatkę na plik w `messages_XXXX.json`, w odpowiadającym mu pliku HTML i w bazie. Kolejka działa niezależnie od `SAVE_STATUSES` i `SAVE_PROFILE_PICS` - naprawia to, co już jest w archiwum. Relacji szuka w kolekcji `Store.Status`, bo `getMessageById()` zagląda wyłącznie do `Store.Msg`, gdzie relacji nigdy nie było. Odzyskane pliki są zliczane w konsoli:
 
 ```text
 Zaległe pliki: odzyskano 2 z 5, czeka jeszcze 3.
@@ -408,7 +419,8 @@ Hook jest dodatkowym zabezpieczeniem, a nie zamiennikiem sprawdzenia zmian przed
 | Pojawia się komunikat o częściowych danych WhatsApp Web | Zaktualizuj `whatsapp-web.js` i ponownie przetestuj aplikację. |
 | Nadrabianie kończy się bez błędu, ale luka z czasu przerwy zostaje | WhatsApp trzyma tę samą rozmowę pod numerem telefonu i pod `@lid`, a historię oddaje tylko temu identyfikatorowi, który ma w `Store`. Drugi zakłada w locie pusty czat i nadrabianie wracało z zerem wiadomości. Teraz identyfikatory jednej rozmowy są grupowane po folderze archiwum, czytanie zaczyna się od znanego stronie, a pusty wynik kieruje do kolejnego aliasu. |
 | Zbiorcze pobranie czatów kończy się krótkim błędem `r: r` | Lista czatów i historia są czytane wprost z `Store`, z pominięciem serializacji modeli, która ten błąd wywołuje. Publiczne `getChats()` i `getChatById()` są używane dopiero jako plan awaryjny, a spis `logs/_czaty.json` jako ostatni. Zakres, którego nie udało się objąć, jest oznaczany jako niepełny, a liczba pominiętych czatów pojawia się w podsumowaniu. |
-| W archiwum jest notatka „nie udało się pobrać pliku" | Pobranie jest ponawiane, bo WhatsApp Web oddaje pustkę również w trakcie ściągania. Zanim logger sięgnie po `DownloadManager`, próbuje wziąć gotowy, rozszyfrowany plik, który przeglądarka trzyma po udanym pobraniu - ta droga nie potrzebuje `directPath` ani `mediaKey`, których wygasłe media czasem już nie mają. Pliku z relacji sprzed doby albo z bezpowrotnie wygasłego załącznika nie odzyska już nikt - notatka zostaje w archiwum wraz z typem i rozmiarem. |
+| W archiwum jest notatka „nie udało się pobrać pliku" | Przeczytaj dalszą część powodu - to ona mówi, czy sprawa jest do naprawienia (tabela w [Pliki, których WhatsApp nie oddał od razu](#pliki-których-whatsapp-nie-oddał-od-razu)). Pobranie jest ponawiane, bo WhatsApp Web oddaje pustkę również w trakcie ściągania. Zanim logger sięgnie po `DownloadManager`, próbuje wziąć gotowy, rozszyfrowany plik, który przeglądarka trzyma po udanym pobraniu - ta droga nie potrzebuje `directPath` ani `mediaKey`, których wygasłe media czasem już nie mają. Pliku z relacji sprzed doby albo z bezpowrotnie wygasłego załącznika nie odzyska już nikt - notatka zostaje w archiwum wraz z typem i rozmiarem. |
+| Ten sam powód przy **każdym** pliku, we wszystkich czatach | To nie jest sprawa WhatsAppa, tylko sieci serwera. Pliki idą z `mmg.whatsapp.net`, nie z `web.whatsapp.com`, więc działający panel i wchodzące wiadomości niczego nie dowodzą. Sprawdź z serwera: `curl -sI https://mmg.whatsapp.net` - brak odpowiedzi znaczy, że zapora albo DNS odcina osobno host mediów. |
 | Zabezpieczony czat nie został odsłonięty | Nowe wiadomości nadal są zapisywane; WhatsApp Web może jedynie nie udostępnić wcześniejszej historii. |
 | Panel nie startuje | Uruchom `npm run panel:build`, a potem ponownie `npm start`. |
 | Panel pokazuje błąd konfiguracji | Sprawdź `AUTH_SECRET` w `panel/.env`. |
