@@ -12,6 +12,7 @@ import { fetchBuffer } from './http';
 import { log } from './log';
 import type { AvatarRecord, AvatarVersion, WaClient, WaContact, WaMessage } from './types';
 import { ensureDir, listDir, readJsonSync, toPosixPath, writeJsonAtomic } from './util';
+import { readProfilePicUrl } from './waClient';
 
 /**
  * Zdjęcie profilowe to miniatura, kilkadziesiąt kB. Limit jest tylko po to,
@@ -181,8 +182,6 @@ export class AvatarStore {
      * jaki mamy pod ręką.
      */
     private async profilePicUrl(id: string, contact: WaContact | null): Promise<string | null> {
-        if (typeof this.client.getProfilePicUrl !== 'function') return null;
-
         const candidates = [
             id,
             contact?.id?._serialized,
@@ -190,6 +189,18 @@ export class AvatarStore {
         ].filter((value, index, all): value is string =>
             Boolean(value) && value !== 'me' && all.indexOf(value) === index,
         );
+
+        // Najpierw odczyt wprost ze Store. Client.getProfilePicUrl() schodzi do
+        // requestProfilePicFromServer(), a ten w bieżącym wydaniu WhatsApp Weba
+        // wywraca się na "Cannot read properties of undefined (reading
+        // 'isNewsletter')" - i to dla każdego kontaktu po kolei, przez co
+        // w archiwum nie zapisywało się ani jedno zdjęcie profilowe.
+        for (const candidate of candidates) {
+            const url = await readProfilePicUrl(this.client, candidate);
+            if (url) return url;
+        }
+
+        if (typeof this.client.getProfilePicUrl !== 'function') return null;
 
         let lastError: unknown = null;
         for (const candidate of candidates) {

@@ -75,6 +75,49 @@ test('zapis JSON-a jest niepodzielny i nie zostawia pliku tymczasowego', async (
     });
 });
 
+test('równoległe zapisy tego samego pliku nie zabierają sobie pliku tymczasowego', async () => {
+    await withTempDir(async (dir) => {
+        // Dokładnie ta sytuacja, która wywalała historię zdjęć profilowych:
+        // przegląd cykliczny i przychodząca wiadomość zapisywały ten sam plik
+        // naraz, więc rename() drugiego z nich kończył się błędem ENOENT.
+        const file = path.join(dir, '_avatars', '_historia.json');
+
+        const results = await Promise.allSettled(
+            Array.from({ length: 20 }, (_, index) => writeJsonAtomic(file, { numer: index })),
+        );
+
+        const odrzucone = results.filter((result) => result.status === 'rejected');
+        assert.deepEqual(
+            odrzucone.map((result) => (result as PromiseRejectedResult).reason),
+            [],
+            'żaden zapis nie ma prawa się wywrócić',
+        );
+
+        // Plik jest kompletny, a nie sklejony z dwóch zapisów naraz.
+        const saved = await readJson<{ numer: number }>(file);
+        assert.equal(typeof saved?.numer, 'number');
+
+        const leftovers = (await fs.readdir(path.dirname(file))).filter((name) =>
+            name.endsWith('.tmp'),
+        );
+        assert.deepEqual(leftovers, [], 'po zapisach nie zostaje żaden plik tymczasowy');
+    });
+});
+
+test('ostatni zlecony zapis wygrywa, niezależnie od kolejności zakończeń', async () => {
+    await withTempDir(async (dir) => {
+        const file = path.join(dir, 'stan.json');
+
+        await Promise.all([
+            writeJsonAtomic(file, { kto: 'pierwszy' }),
+            writeJsonAtomic(file, { kto: 'drugi' }),
+            writeJsonAtomic(file, { kto: 'trzeci' }),
+        ]);
+
+        assert.deepEqual(await readJson(file), { kto: 'trzeci' });
+    });
+});
+
 test('uszkodzony JSON czyta się jako null, zamiast wywracać program', async () => {
     await withTempDir(async (dir) => {
         const file = path.join(dir, 'zepsuty.json');

@@ -45,6 +45,8 @@ export function testConfig(logsDir: string, overrides: Partial<Config> = {}): Co
         panelEnabled: false,
         panelHost: '127.0.0.1',
         panelPort: 3000,
+        panelLanOnly: true,
+        panelAllowedIps: [],
 
         tauEnabled: false,
         tauProviderNumber: '18002428478',

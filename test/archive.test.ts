@@ -362,6 +362,8 @@ test('zwykłe nadrabianie pomija czat bez folderu, a jawny tryb może go założ
             complete: true,
         });
         assert.equal(fetchCalls, 0);
+        // Zwykłe nadrabianie nie zakłada nowych folderów - w logs/ nie ma
+        // po nim śladu.
         assert.deepEqual(await listFiles(dir), []);
 
         assert.deepEqual(
@@ -390,6 +392,135 @@ test('zwykłe nadrabianie pomija czat bez folderu, a jawny tryb może go założ
         assert.ok(progress.some((event) => event.stage === 'saving'));
     });
 });
+
+test('zwykłe nadrabianie nie zakłada folderu rozmowie, której jeszcze nie ma', () =>
+    withTempDir(async (dir) => {
+        // Rozmowa ruszyła, gdy program nie pracował. Folderu nie ma, więc
+        // zwykły start jej nie dotyka - od tego jest --nadrob-wszystko.
+        const teraz = Math.floor(Date.now() / 1000);
+        let fetchCalls = 0;
+        const client = fakeClient({ lidToPhone: { '999@lid': '5550100@c.us' } });
+        client.getChats = async () =>
+            [
+                {
+                    id: { _serialized: '999@lid' },
+                    timestamp: teraz,
+                    fetchMessages: async () => {
+                        fetchCalls++;
+                        return [];
+                    },
+                },
+            ] as unknown as Awaited<ReturnType<typeof client.getChats>>;
+
+        const archive = new Archive(testConfig(dir), client);
+        const stats = await archive.backfillRecent(25);
+
+        assert.equal(stats.skippedNewChats, 1);
+        assert.equal(fetchCalls, 0);
+        assert.deepEqual(await listFiles(dir), []);
+    }));
+
+test('nadrabianie czyta czat identyfikatorem, który zna strona, a nie tym ze spisu', () =>
+    withTempDir(async (dir) => {
+        // Archiwum prowadzi rozmowę pod numerem telefonu, ale WhatsApp trzyma
+        // ją dziś pod @lid. Czytanie po numerze schodziło do
+        // findOrCreateLatestChat(), dostawało świeży pusty czat i wracało
+        // z zerem wiadomości - luka po przerwie nie zamykała się nigdy.
+        const stara = fakeMessage({
+            id: 'stara',
+            from: '999@lid',
+            body: 'sprzed przerwy',
+            timestamp: 10,
+        });
+        const zPrzerwy = fakeMessage({
+            id: 'z-przerwy',
+            from: '999@lid',
+            body: '2345',
+            timestamp: 20,
+        });
+
+        const client = fakeClient({ lidToPhone: { '999@lid': '5550100@c.us' } });
+        // Zbiorcze getChats() nie jest tu używane - lista przychodzi wprost
+        // ze Store - ale nadrabianie sprawdza, czy klient je w ogóle ma.
+        client.getChats = async () => [];
+        const otwarte: string[] = [];
+        let evaluateCalls = 0;
+        client.pupPage = {
+            evaluate: async () => {
+                evaluateCalls++;
+                // Pierwsze wywołanie to surowa lista czatów: strona zna
+                // wyłącznie @lid. Dalej udajemy wydanie WhatsApp Weba,
+                // z którego nie da się czytać wprost.
+                if (evaluateCalls === 1) {
+                    return [{ id: '999@lid', name: '', lastActivity: 20, unread: 0 }];
+                }
+                return null;
+            },
+        } as unknown as NonNullable<typeof client.pupPage>;
+        client.getChatById = async (id: string) => {
+            otwarte.push(id);
+            return {
+                id: { _serialized: id },
+                // Numer telefonu oddaje pusty, nowo założony czat.
+                fetchMessages: async () => (id === '999@lid' ? [zPrzerwy, stara] : []),
+            } as unknown as Awaited<ReturnType<typeof client.getChatById>>;
+        };
+
+        const archive = new Archive(testConfig(dir, { messagesPerFile: 100 }), client);
+        await archive.save(stara);
+
+        const stats = await archive.backfillRecent(25);
+
+        assert.equal(stats.saved, 1, 'wiadomość z czasu przerwy trafia do archiwum');
+        assert.equal(stats.chats, 1, 'oba identyfikatory to jedna rozmowa');
+        assert.equal(otwarte[0], '999@lid', 'zaczynamy od identyfikatora, który zna strona');
+
+        const state = await readState(dir, '5550100');
+        assert.deepEqual(
+            state.pendingMessages.map((message) => message.body),
+            ['sprzed przerwy', '2345'],
+        );
+    }));
+
+test('gdy identyfikator ze spisu oddaje pustkę, nadrabianie próbuje aliasu', () =>
+    withTempDir(async (dir) => {
+        const stara = fakeMessage({ id: 'stara', from: '999@lid', body: 'jest', timestamp: 10 });
+        const nowa = fakeMessage({ id: 'nowa', from: '999@lid', body: 'z luki', timestamp: 20 });
+
+        const client = fakeClient({ lidToPhone: { '999@lid': '5550100@c.us' } });
+        client.getChats = async () => [];
+        const proby: string[] = [];
+        let evaluateCalls = 0;
+        client.pupPage = {
+            evaluate: async () => {
+                evaluateCalls++;
+                // Strona zna oba identyfikatory, więc pierwszeństwo ma numer
+                // telefonu - a ten akurat nie ma już historii.
+                if (evaluateCalls === 1) {
+                    return [
+                        { id: '5550100@c.us', name: '', lastActivity: 20, unread: 0 },
+                        { id: '999@lid', name: '', lastActivity: 20, unread: 0 },
+                    ];
+                }
+                return null;
+            },
+        } as unknown as NonNullable<typeof client.pupPage>;
+        client.getChatById = async (id: string) => {
+            proby.push(id);
+            return {
+                id: { _serialized: id },
+                fetchMessages: async () => (id === '999@lid' ? [nowa, stara] : []),
+            } as unknown as Awaited<ReturnType<typeof client.getChatById>>;
+        };
+
+        const archive = new Archive(testConfig(dir, { messagesPerFile: 100 }), client);
+        await archive.save(stara);
+
+        const stats = await archive.backfillRecent(25);
+
+        assert.equal(stats.saved, 1);
+        assert.deepEqual(proby, ['5550100@c.us', '999@lid'], 'pusty wynik nie kończy sprawy');
+    }));
 
 test('nadrabianie rozwija czaty pojedynczo, gdy zbiorcze getChats jest uszkodzone', async () => {
     await withTempDir(async (dir) => {

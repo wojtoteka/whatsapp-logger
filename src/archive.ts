@@ -31,7 +31,10 @@ import {
     placeholderName,
 } from './identity';
 import { describeError, log } from './log';
-import { MediaDownloader } from './media';
+import { isRecoverableMediaFailure, MediaDownloader } from './media';
+import type { MediaResult } from './media';
+import { MediaRetryQueue } from './mediaRetry';
+import type { PendingMedia } from './mediaRetry';
 import {
     bareId,
     isStatusChat,
@@ -48,8 +51,10 @@ import {
     listContactChatIds,
     listStatusMessages,
     prepareFullHistoryScan,
+    readChatMessagesFromStore,
     readFullHistoryBatch,
 } from './waClient';
+import type { RawChatSummary } from './waClient';
 import type {
     ArchivedMessage,
     BatchFile,
@@ -90,6 +95,16 @@ const IGNORED_TYPES = new Set([
 
 /** Tyle ostatnich identyfikatorów wystarczy do bezpiecznego nadrabiania historii. */
 const SEEN_ID_LIMIT = 10_000;
+
+/** Ile powodów porażki czatu wypisujemy wprost, zanim zaczniemy je zwijać. */
+const REPORTED_CHAT_FAILURES = 3;
+
+/**
+ * Przegląd zaległych plików dzieli stronę WhatsApp Weba z bieżącą pracą,
+ * więc jedno podejście nie może w niej siedzieć długo. Plik, który nie
+ * zdążył, wraca w kolejce przy następnym przeglądzie.
+ */
+const MEDIA_RETRY_STAGE_WAIT_MS = 5_000;
 
 /**
  * syncHistory() 1.34.6 potwierdza wysłanie żądania, nie otrzymanie danych.
@@ -172,6 +187,12 @@ type BackfillChat = Awaited<ReturnType<WaClient['getChats']>>[number];
  */
 interface BackfillTarget {
     id: string | null;
+    /**
+     * Wszystkie identyfikatory tej rozmowy - numer telefonu i @lid. Historię
+     * czyta się wyłącznie tym, który WhatsApp Web faktycznie trzyma
+     * w pamięci; pozostałe zostają jako plan awaryjny.
+     */
+    ids: string[];
     name: string;
     /** Prośba do urządzenia głównego o świeższą historię. */
     syncHistory: (() => Promise<boolean>) | null;
@@ -187,6 +208,29 @@ interface BackfillChatList {
     listingDegraded?: boolean;
 }
 
+/** Wynik jednego przebiegu ponawiania mediów. */
+export interface MediaRetryStats {
+    tried: number;
+    recovered: number;
+    /** Ile wiadomości nadal czeka na plik. */
+    waiting: number;
+}
+
+/**
+ * Czym skończyło się jedno podejście do zaległego pliku:
+ * plik wrócił, WhatsApp go nie oddał, albo nie ma już wiadomości,
+ * do której miałby trafić.
+ */
+type RetryOutcome = 'odzyskany' | 'bez-pliku' | 'bez-miejsca';
+
+/** Gdzie na dysku leży czat - tyle, ile trzeba do podmiany pliku. */
+interface ChatPlace {
+    chatDir: string;
+    mediaDir: string;
+    safeName: string;
+    name: string;
+}
+
 export class Archive {
     private readonly states = new Map<string, ChatState>();
     private readonly queues = new Map<string, Promise<unknown>>();
@@ -200,6 +244,8 @@ export class Archive {
     private readonly identity: IdentityResolver;
     private readonly media: MediaDownloader;
     private readonly avatars: AvatarStore;
+    /** Pliki, których WhatsApp nie oddał za pierwszym razem. */
+    private readonly mediaRetry: MediaRetryQueue;
 
     constructor(
         private readonly config: Config,
@@ -211,6 +257,7 @@ export class Archive {
         this.identity = new IdentityResolver(client);
         this.media = new MediaDownloader(config);
         this.avatars = new AvatarStore(config, client);
+        this.mediaRetry = new MediaRetryQueue(config.logsDir);
         this.loadIndex();
     }
 
@@ -395,6 +442,23 @@ export class Archive {
             poll: pollInfo(message),
         };
 
+        // Plik, którego WhatsApp nie oddał, wraca do kolejki - przegląd
+        // spróbuje jeszcze raz, gdy telefon wyśle media ponownie. Warunkiem
+        // jest prawdziwy identyfikator WhatsAppa, bo tylko po nim da się
+        // później odnaleźć tę wiadomość.
+        if (
+            media.skipped &&
+            isRecoverableMediaFailure(media.skipped.reason) &&
+            messageKey(message) === msgId
+        ) {
+            await this.mediaRetry.add({
+                chatId: state.id,
+                messageId: msgId,
+                type: message.type,
+                reason: media.skipped.reason,
+            });
+        }
+
         this.rememberMessageId(state, msgId);
         state.pending.push(entry);
         state.totalMessages++;
@@ -549,8 +613,23 @@ export class Archive {
                     chatName,
                 );
 
-                if (fullHistory && chatId) {
-                    const scan = await prepareFullHistoryScan(this.client, chatId);
+                if (fullHistory && chat.ids.length > 0) {
+                    // Ten sam powód, co przy fetchMessages: skan przygotowuje
+                    // się wyłącznie dla identyfikatora, który strona zna.
+                    let scanId = chat.ids[0]!;
+                    let scan = await prepareFullHistoryScan(this.client, scanId);
+                    for (const id of chat.ids.slice(1)) {
+                        if (scan.supported && scan.total > 0) break;
+                        const next = await prepareFullHistoryScan(this.client, id);
+                        if (next.supported && next.total >= scan.total) {
+                            await clearFullHistoryScan(this.client, scanId).catch((err) =>
+                                log.quiet(err, { stage: 'czyszczenie pełnego skanu', chat: scanId }),
+                            );
+                            scanId = id;
+                            scan = next;
+                        }
+                    }
+
                     if (scan.supported) {
                         const knownIds = await this.allMessageIds(chatId);
                         let newest: WaMessage | null = null;
@@ -559,7 +638,7 @@ export class Archive {
                             for (let offset = 0; offset < scan.total; offset += batchSize) {
                                 const messages = await readFullHistoryBatch(
                                     this.client,
-                                    chatId,
+                                    scanId,
                                     offset,
                                     batchSize,
                                 );
@@ -579,8 +658,8 @@ export class Archive {
                                 );
                             }
                         } finally {
-                            await clearFullHistoryScan(this.client, chatId).catch((err) =>
-                                log.quiet(err, { stage: 'czyszczenie pełnego skanu', chat: chatId }),
+                            await clearFullHistoryScan(this.client, scanId).catch((err) =>
+                                log.quiet(err, { stage: 'czyszczenie pełnego skanu', chat: scanId }),
                             );
                         }
                         if (newest) await this.commitCheckpoint(chatId, newest);
@@ -695,6 +774,13 @@ export class Archive {
                 stats.failedChats++;
                 stats.complete = false;
                 log.quiet(err, { stage: 'nadrabianie czatu', chat: chatId });
+                // Do tej pory powód szedł wyłącznie do _bledy.json, a w konsoli
+                // zostawało samo "błędów czatów N" - bez śladu, czego szukać.
+                if (stats.failedChats <= REPORTED_CHAT_FAILURES) {
+                    log.warn(
+                        `Nadrabianie "${chatName}" nie doszło do skutku: ${describeError(err)}`,
+                    );
+                }
                 progress(
                     chatStart + chatShare,
                     'saving',
@@ -849,8 +935,8 @@ export class Archive {
         const contacts = includeNewChats ? await listContactChatIds(this.client) : null;
 
         if (raw || contacts) {
-            const names = new Map((raw ?? []).map((chat) => [chat.id, chat.name]));
-            const ids = new Set<string>(names.keys());
+            const summaries = new Map((raw ?? []).map((chat) => [chat.id, chat]));
+            const ids = new Set<string>(summaries.keys());
             for (const id of contacts ?? []) ids.add(id);
             // Rozmowa bywa w archiwum, a w Store tej sesji jeszcze nie -
             // wtedy to spis archiwum jest jedynym śladem, że w ogóle istnieje.
@@ -860,7 +946,7 @@ export class Archive {
                 `Nadrabianie: ${raw?.length ?? 0} czatów ze strony, ` +
                     `${contacts?.length ?? 0} kontaktów, razem ${ids.size} do sprawdzenia.`,
             );
-            await this.openChatsById([...ids], includeNewChats, result, onOpening, names);
+            await this.openChatsById([...ids], includeNewChats, result, onOpening, summaries);
             return result;
         }
 
@@ -883,11 +969,12 @@ export class Archive {
         for (const chat of chats) {
             const chatId = chat.id?._serialized ?? null;
             const exists = chatId ? await this.hasExistingChatFolder(chatId) : false;
+
             if (!includeNewChats && (!chatId || !exists)) {
                 result.skippedNewChats++;
                 continue;
             }
-            if (includeNewChats && chatId && !exists) result.newChatIds.push(chatId);
+            if (chatId && !exists) result.newChatIds.push(chatId);
             result.chats.push(targetFromChat(chat, chatId));
             onOpening?.(result.chats.length, chats.length, chat.name?.trim() || chatId || 'nieznany czat');
         }
@@ -905,52 +992,136 @@ export class Archive {
         includeNewChats: boolean,
         result: BackfillChatList,
         onOpening?: (current: number, total: number, chat: string) => void,
-        names?: ReadonlyMap<string, string>,
+        summaries?: ReadonlyMap<string, RawChatSummary>,
     ): Promise<void> {
-        const selected: string[] = [];
-        // Ten sam czat bywa w spisie pod numerem i pod @lid. Otwieramy go raz,
-        // zaczynając od numeru - dla niego WhatsApp częściej oddaje komplet danych.
-        const seenFolders = new Set<string>();
+        // Ten sam czat bywa w spisie pod numerem telefonu i pod @lid.
+        // Grupujemy identyfikatory po folderze archiwum: rozmowę otwieramy
+        // raz, ale zapamiętujemy komplet jej identyfikatorów.
+        const groups = new Map<string, string[]>();
+        for (const chatId of new Set(ids)) {
+            // Czat bez folderu jest sam dla siebie. Dwukropek jest w nazwie
+            // folderu znakiem zakazanym (util.ts), więc taki klucz nie
+            // sklei się z żadnym prawdziwym wpisem ze spisu archiwum.
+            const folder = this.index.get(chatId)?.safeName ?? `id:${chatId}`;
+            const group = groups.get(folder);
+            if (group) group.push(chatId);
+            else groups.set(folder, [chatId]);
+        }
 
-        for (const chatId of [...new Set(ids)].sort(phoneIdsFirst)) {
-            const folder = this.index.get(chatId)?.safeName ?? null;
-            if (folder && seenFolders.has(folder)) continue;
+        const selected: BackfillTarget[] = [];
+        for (const candidates of groups.values()) {
+            const ranked = [...candidates].sort(readableIdsFirst(summaries));
+            const primary = ranked[0];
+            if (!primary) continue;
 
-            const exists = await this.hasExistingChatFolder(chatId);
+            let exists = false;
+            for (const chatId of ranked) {
+                if (await this.hasExistingChatFolder(chatId)) {
+                    exists = true;
+                    break;
+                }
+            }
+
+            // Zwykły start dotyka wyłącznie rozmów, które mają już swój folder
+            // w logs/. Resztę bierze dopiero jawne --nadrob-wszystko.
             if (!includeNewChats && !exists) {
                 result.skippedNewChats++;
                 continue;
             }
-            if (includeNewChats && !exists) result.newChatIds.push(chatId);
-            if (folder) seenFolders.add(folder);
-            selected.push(chatId);
+            if (!exists) result.newChatIds.push(primary);
+
+            const name =
+                ranked.map((id) => summaries?.get(id)?.name?.trim()).find(Boolean) ??
+                ranked.map((id) => this.index.get(id)?.name?.trim()).find(Boolean) ??
+                '';
+            selected.push(this.targetById(primary, name, ranked.slice(1)));
         }
 
-        for (const [index, chatId] of selected.entries()) {
-            const name = names?.get(chatId) ?? this.index.get(chatId)?.name ?? '';
-            result.chats.push(this.targetById(chatId, name));
-            onOpening?.(index + 1, selected.length, name.trim() || chatId);
+        for (const [index, target] of selected.entries()) {
+            result.chats.push(target);
+            onOpening?.(index + 1, selected.length, target.name.trim() || target.id || '');
         }
     }
 
-    /** Czat czytany po identyfikatorze, z publicznym API jako planem awaryjnym. */
-    private targetById(chatId: string, name: string): BackfillTarget {
+    /**
+     * Czat czytany po identyfikatorze, z publicznym API jako planem awaryjnym.
+     *
+     * Aliasy to nie ozdobnik. WWebJS.getChat() dla identyfikatora, którego
+     * strona nie zna, schodzi do findOrCreateLatestChat() i oddaje świeżo
+     * utworzoną, pustą rozmowę. Nadrabianie widziało wtedy zero wiadomości,
+     * kończyło się bez błędu i luka po przerwie nie zamykała się już nigdy -
+     * mimo że czat miał swój folder, a wiadomości leżały pod drugim
+     * identyfikatorem tej samej osoby.
+     */
+    private targetById(
+        chatId: string,
+        name: string,
+        aliases: readonly string[] = [],
+    ): BackfillTarget {
+        const ids = [chatId, ...aliases];
         return {
             id: chatId,
+            ids,
             name,
             syncHistory:
                 typeof this.client.syncHistory === 'function'
-                    ? () => this.client.syncHistory(chatId)
+                    ? async () => {
+                          let requested = false;
+                          for (const id of ids) {
+                              try {
+                                  if (await this.client.syncHistory(id)) requested = true;
+                              } catch (err) {
+                                  log.quiet(err, { stage: 'nadrabianie: syncHistory', chat: id });
+                              }
+                          }
+                          return requested;
+                      }
                     : null,
             fetchMessages: async (limit) => {
-                const raw = await fetchMessagesRaw(this.client, chatId, limit);
-                if (raw) return raw;
-
-                const chat = await this.client.getChatById(chatId);
-                if (!chat) throw new Error(`WhatsApp nie otworzył czatu ${chatId}`);
-                return (await chat.fetchMessages({ limit })) as WaMessage[];
+                let firstError: unknown = null;
+                for (const id of ids) {
+                    try {
+                        const messages = await this.readChatMessages(id, limit);
+                        // Pusto znaczy tu "to nie ten identyfikator" - czat
+                        // z folderem w archiwum ma co najmniej jedną wiadomość.
+                        if (messages.length > 0) return messages;
+                    } catch (err) {
+                        firstError ??= err;
+                    }
+                }
+                if (firstError) throw firstError;
+                return [];
             },
         };
+    }
+
+    /** Wiadomości jednego identyfikatora, każdą drogą po kolei. */
+    private async readChatMessages(chatId: string, limit: number): Promise<WaMessage[]> {
+        const raw = await fetchMessagesRaw(this.client, chatId, limit);
+        if (raw) return raw;
+
+        // Publiczne API serializuje model czatu i potrafi się na nim
+        // wywrócić. Zanim uznamy czat za stracony, czytamy jeszcze to,
+        // co przeglądarka trzyma w pamięci - niepełny zakres jest
+        // lepszy niż czat wypadający z nadrabiania w całości.
+        try {
+            const chat = await this.client.getChatById(chatId);
+            if (chat) return (await chat.fetchMessages({ limit })) as WaMessage[];
+        } catch (err) {
+            const fromStore = await readChatMessagesFromStore(this.client, chatId, limit);
+            if (fromStore) {
+                log.debug(
+                    `Nadrabianie ${chatId}: model czatu niedostępny ` +
+                        `(${describeError(err)}), czytam z kolekcji wiadomości.`,
+                );
+                return fromStore;
+            }
+            throw err;
+        }
+
+        const fromStore = await readChatMessagesFromStore(this.client, chatId, limit);
+        if (fromStore) return fromStore;
+        throw new Error(`WhatsApp nie otworzył czatu ${chatId}`);
     }
 
     /** Czaty ze spisu archiwum. Relacje mają własny przegląd i tu nie należą. */
@@ -1355,6 +1526,180 @@ export class Archive {
         return this.config.retentionEnabled && this.config.retentionDays > 0
             ? `Starsze pliki kasują się po ${this.config.retentionDays} dniach.`
             : 'Kasowanie starych plików jest wyłączone.';
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    //  Ponowne pobieranie mediów
+    // ─────────────────────────────────────────────────────────────────────
+
+    /**
+     * Wraca do plików, których WhatsApp nie oddał przy pierwszym zapisie.
+     *
+     * Samo nadrabianie tego nie naprawi: wiadomość jest już w archiwum, więc
+     * kolejny przebieg widzi znajome ID i pomija ją jako zapisaną. Dlatego
+     * takie wiadomości mają własną kolejkę, a tutaj po prostu prosimy
+     * WhatsAppa o tę jedną wiadomość jeszcze raz i - jeśli plik tym razem
+     * przyszedł - podmieniamy notatkę na prawdziwy plik w JSON-ie, HTML-u
+     * i w bazie.
+     */
+    async retryFailedMedia(limit = 10): Promise<MediaRetryStats> {
+        const stats: MediaRetryStats = { tried: 0, recovered: 0, waiting: 0 };
+        if (typeof this.client.getMessageById !== 'function') return stats;
+
+        for (const entry of await this.mediaRetry.due(limit)) {
+            stats.tried++;
+            let outcome: RetryOutcome = 'bez-pliku';
+            try {
+                outcome = await this.retryOneMedia(entry);
+            } catch (err) {
+                log.quiet(err, {
+                    stage: 'ponowne pobieranie mediów',
+                    chat: entry.chatId,
+                    messageId: entry.messageId,
+                    messageType: entry.type,
+                });
+            }
+
+            if (outcome === 'odzyskany') {
+                await this.mediaRetry.remove(entry.messageId);
+                stats.recovered++;
+            } else if (outcome === 'bez-miejsca') {
+                // Wiadomości nie ma już w archiwum - najczęściej skasowała ją
+                // retencja. Kolejne podejścia nie mają do czego wracać.
+                await this.mediaRetry.remove(entry.messageId);
+            } else {
+                await this.mediaRetry.markAttempt(entry.messageId);
+            }
+        }
+
+        await this.mediaRetry.prune();
+        stats.waiting = await this.mediaRetry.size();
+        return stats;
+    }
+
+    private async retryOneMedia(entry: PendingMedia): Promise<RetryOutcome> {
+        const place = this.chatPlace(entry.chatId);
+        if (!place) return 'bez-miejsca';
+
+        const message = (await this.client.getMessageById(entry.messageId)) as WaMessage | null;
+        if (!message?.hasMedia) return 'bez-pliku';
+
+        const media = await this.media.download(
+            message,
+            {
+                mediaDir: place.mediaDir,
+                chatDir: place.chatDir,
+                isStatus: isStatusChat(entry.chatId),
+                label: place.name,
+            },
+            { waitForStageMs: MEDIA_RETRY_STAGE_WAIT_MS },
+        );
+        if (!media.path) return 'bez-pliku';
+
+        if (!(await this.applyRecoveredMedia(entry, media, place))) {
+            // Plik jest pobrany, ale wiadomości, do której należał, już nie ma.
+            // Zostawienie go na dysku dokładałoby sierotę przy każdym podejściu.
+            await fs.rm(path.resolve(place.chatDir, media.path), { force: true }).catch(
+                () => undefined,
+            );
+            return 'bez-miejsca';
+        }
+
+        log.info(`Odzyskano plik w "${place.name}" (${entry.type}).`);
+        return 'odzyskany';
+    }
+
+    /** Folder czatu z pamięci albo ze spisu - bez otwierania pełnego stanu. */
+    private chatPlace(chatId: string): ChatPlace | null {
+        const state = this.states.get(chatId);
+        if (state) {
+            return {
+                chatDir: state.chatDir,
+                mediaDir: state.mediaDir,
+                safeName: state.safeName,
+                name: state.name,
+            };
+        }
+
+        const known = this.index.get(chatId);
+        if (!known?.safeName) return null;
+
+        const chatDir = path.join(this.config.logsDir, known.safeName);
+        return {
+            chatDir,
+            mediaDir: path.join(chatDir, 'media'),
+            safeName: known.safeName,
+            name: known.name,
+        };
+    }
+
+    /** Podmienia notatkę na pobrany plik wszędzie, gdzie ta wiadomość leży. */
+    private async applyRecoveredMedia(
+        entry: PendingMedia,
+        media: MediaResult,
+        place: ChatPlace,
+    ): Promise<boolean> {
+        const patch = (archived: ArchivedMessage): void => {
+            archived.mediaPath = media.path;
+            archived.mediaName = media.name;
+            archived.mediaSkipped = null;
+        };
+
+        // Wiadomość może jeszcze czekać w bieżącej partii - wtedy wystarczy
+        // poprawić stan, a plik HTML i tak powstanie dopiero przy zamknięciu.
+        const state = this.states.get(entry.chatId);
+        const pending = state?.pending.find((item) => item.id === entry.messageId);
+        if (state && pending) {
+            await this.enqueue(entry.chatId, async () => {
+                patch(pending);
+                await this.saveState(state);
+                await this.db?.saveMessage(toMessageRow(pending, state.id, state.safeName));
+            });
+            return true;
+        }
+
+        const files = (await listDir(place.chatDir))
+            .filter((file) => /^messages_\d+\.json$/.test(file))
+            .sort()
+            .reverse();
+
+        for (const file of files) {
+            const full = path.join(place.chatDir, file);
+            const batch = await readJson<BatchFile>(full);
+            const archived = batch?.messages?.find((item) => item.id === entry.messageId);
+            if (!batch || !archived) continue;
+
+            patch(archived);
+            await writeJsonAtomic(full, batch);
+
+            // HTML składamy z tej samej partii od nowa - dopisanie zdjęcia
+            // w gotowej stronie wymagałoby powtórzenia całego szablonu.
+            const batchNum = Number.parseInt(/(\d+)/.exec(file)?.[1] ?? '', 10);
+            if (Number.isFinite(batchNum)) {
+                const isLatest = !(await pathExists(
+                    path.join(place.chatDir, batchFileName(batchNum + 1)),
+                ));
+                await writeFileAtomic(
+                    path.join(place.chatDir, batchFileName(batchNum)),
+                    generateHtml({
+                        // Bieżąca nazwa, nie ta z pliku: zmiana nazwy czatu
+                        // poprawia nagłówki w HTML, ale chatName w JSON-ie
+                        // zostaje stary - odtworzenie z niego cofnęłoby nazwę.
+                        chatName: place.name || batch.chatName,
+                        batchNum,
+                        messages: batch.messages,
+                        isLatest,
+                        messagesPerFile: this.config.messagesPerFile,
+                        retentionNote: this.retentionNote(),
+                    }),
+                );
+            }
+
+            await this.db?.saveMessage(toMessageRow(archived, entry.chatId, place.safeName));
+            return true;
+        }
+
+        return false;
     }
 
     // ─────────────────────────────────────────────────────────────────────
@@ -1813,9 +2158,27 @@ export class Archive {
 }
 
 /** Numery przed @lid - dla numeru WhatsApp częściej oddaje komplet danych. */
-function phoneIdsFirst(a: string, b: string): number {
-    const rank = (id: string): number => (id.endsWith('@lid') ? 1 : 0);
-    return rank(a) - rank(b);
+/**
+ * Czy w czacie działo się coś po podanej chwili. WhatsApp podaje znacznik
+ * w sekundach; brak znacznika albo brak progu znaczy "nie wiadomo", a wtedy
+ * nowego folderu nie zakładamy.
+ */
+/**
+ * Kolejność identyfikatorów tej samej rozmowy.
+ *
+ * Najpierw ten, który WhatsApp Web ma w pamięci - tylko z niego da się
+ * odczytać historię. Wcześniej pierwszeństwo miał zawsze numer telefonu,
+ * a WhatsApp trzyma dziś rozmowę pod @lid: nadrabianie otwierało wtedy
+ * pusty czat założony w locie przez findOrCreateLatestChat() i wracało
+ * z zerem wiadomości. Przy remisie numer telefonu nadal wygrywa - dla
+ * niego WhatsApp częściej oddaje komplet danych o kontakcie.
+ */
+function readableIdsFirst(
+    summaries?: ReadonlyMap<string, RawChatSummary>,
+): (a: string, b: string) => number {
+    const rank = (id: string): number =>
+        (summaries?.has(id) === true ? 0 : 2) + (id.endsWith('@lid') ? 1 : 0);
+    return (a, b) => rank(a) - rank(b);
 }
 
 /** Najwyższy numer zamkniętej partii leżącej w folderze czatu. */
@@ -1834,6 +2197,7 @@ async function lastBatchNumber(chatDir: string): Promise<number> {
 function targetFromChat(chat: BackfillChat, chatId: string | null): BackfillTarget {
     return {
         id: chatId,
+        ids: chatId ? [chatId] : [],
         name: chat.name?.trim() ?? '',
         syncHistory: typeof chat.syncHistory === 'function' ? () => chat.syncHistory() : null,
         fetchMessages: async (limit) => (await chat.fetchMessages({ limit })) as WaMessage[],

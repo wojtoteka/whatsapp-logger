@@ -396,6 +396,14 @@ export function healthLine(health: StoreHealth): string {
 export interface RawChatSummary {
     id: string;
     name: string;
+    /**
+     * Znacznik ostatniej aktywności w sekundach, prosto z modelu WhatsAppa.
+     * Po nim poznajemy rozmowę, w której coś się działo, gdy program nie
+     * pracował - także taką, która nie ma jeszcze folderu w archiwum.
+     */
+    lastActivity: number;
+    /** Ile wiadomości WhatsApp uważa za nieprzeczytane. */
+    unread: number;
 }
 
 /** Lista czatów bez getChatModel(). */
@@ -421,13 +429,25 @@ export async function listChatsRaw(client: WaClient): Promise<RawChatSummary[] |
             return collection.getModelsArray().map((chat: any) => {
                 const id = chat?.id?._serialized;
                 if (typeof id !== 'string' || id.length === 0) return null;
+                // "t" bywa jedynym śladem po rozmowie, której nie ma jeszcze
+                // w archiwum - dlatego czytamy go osobno od nazwy, która
+                // potrafi rzucić wyjątkiem.
+                let lastActivity = 0;
+                let unread = 0;
+                try {
+                    lastActivity = Number(chat?.t ?? chat?.lastReceivedKey?.t ?? 0) || 0;
+                    unread = Number(chat?.unreadCount ?? 0) || 0;
+                } catch {
+                    lastActivity = 0;
+                }
+
                 try {
                     // formattedTitle bywa getterem liczonym z kontaktu - gdyby
                     // rzucił, czat i tak ma zostać na liście, tylko bez nazwy.
                     const name = chat.formattedTitle ?? chat.name ?? chat.contact?.name ?? '';
-                    return { id, name: typeof name === 'string' ? name : '' };
+                    return { id, name: typeof name === 'string' ? name : '', lastActivity, unread };
                 } catch {
-                    return { id, name: '' };
+                    return { id, name: '', lastActivity, unread };
                 }
             });
             /* eslint-enable @typescript-eslint/no-explicit-any */
@@ -537,6 +557,82 @@ export async function fetchMessagesRaw(
 }
 
 /**
+ * Ostatnia deska ratunku: wiadomości czatu prosto z kolekcji Store.Msg.
+ *
+ * fetchMessagesRaw() potrzebuje WWebJS.getChat(), a ten dla czatu spoza
+ * pamięci schodzi do Store.FindOrCreateChat - modułu, którego kolejne wydania
+ * WhatsApp Weba potrafią nie mieć pod tą nazwą. Padało wtedy i to wywołanie,
+ * i publiczne getChatById(), a czat wypadał z nadrabiania w całości ("błędów
+ * czatów N", zero przejrzanych wiadomości).
+ *
+ * Tutaj nie ma żadnego modelu czatu ani ładowania historii - bierzemy to, co
+ * przeglądarka i tak trzyma w pamięci. To mniej niż pełne okno nadrabiania,
+ * ale znacznie więcej niż nic.
+ */
+export async function readChatMessagesFromStore(
+    client: WaClient,
+    chatId: string,
+    limit: number,
+): Promise<WaMessage[] | null> {
+    const page = client.pupPage;
+    if (!page || typeof page.evaluate !== 'function') return null;
+
+    const count = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 50_000;
+
+    let models: unknown;
+    try {
+        models = await page.evaluate(
+            (id: string, wanted: number): unknown => {
+                /* eslint-disable @typescript-eslint/no-explicit-any */
+                const root = globalThis as any;
+                const win = root.window ?? root;
+                if (!win.WWebJS?.getMessageModel) return null;
+
+                let collection = win.Store?.Msg;
+                if (!collection?.getModelsArray && typeof win.require === 'function') {
+                    try {
+                        collection = win.require('WAWebCollections')?.Msg;
+                    } catch {
+                        collection = undefined;
+                    }
+                }
+                if (!collection?.getModelsArray) return null;
+
+                const belongsHere = (message: any): boolean => {
+                    try {
+                        const remote = message?.id?.remote;
+                        const serialized =
+                            typeof remote === 'string' ? remote : remote?._serialized;
+                        return serialized === id;
+                    } catch {
+                        return false;
+                    }
+                };
+
+                let msgs = collection
+                    .getModelsArray()
+                    .filter((message: any) => !message?.isNotification && belongsHere(message));
+
+                msgs.sort((a: any, b: any) => Number(a?.t ?? 0) - Number(b?.t ?? 0));
+                if (msgs.length > wanted) msgs = msgs.slice(msgs.length - wanted);
+                return msgs.map((message: any) => win.WWebJS.getMessageModel(message));
+                /* eslint-enable @typescript-eslint/no-explicit-any */
+            },
+            chatId,
+            count,
+        );
+    } catch (err) {
+        log.quiet(err, { stage: 'odczyt wiadomości z kolekcji', chat: chatId });
+        return null;
+    }
+
+    const messages = toMessages(client, models);
+    // Pusto znaczy tu "nic nie wiem", a nie "czat jest pusty" - wywołujący
+    // ma jeszcze publiczne API do wypróbowania.
+    return messages && messages.length > 0 ? messages : null;
+}
+
+/**
  * Relacje prosto z kolekcji Store.Status. getBroadcasts() składa je z
  * status.serialize(), a to w nowszych wydaniach WhatsApp Weba potrafi oddać
  * model bez pola msgs - przegląd nie miał wtedy czego dopisywać.
@@ -586,6 +682,204 @@ export async function listStatusMessages(client: WaClient): Promise<WaMessage[] 
     return toMessages(client, models);
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+//  Nazwa czatu i zdjęcie profilowe bez serializacji modelu
+// ─────────────────────────────────────────────────────────────────────────
+
+/**
+ * Nazwa czatu prosto z kolekcji Store.
+ *
+ * message.getChat() przepuszcza rozmowę przez getChatModel(), a ten dla grupy
+ * bez dociągniętych metadanych kończy się zminifikowanym "r: r". Nazwa
+ * przepadała wtedy w całości i w archiwum zostawał sam identyfikator grupy.
+ * Tutaj bierzemy wyłącznie tytuł: z modelu czatu, z metadanych grupy, a poza
+ * grupami z kontaktu - żadnej serializacji, więc nie ma się na czym wywrócić.
+ * Zwracana nazwa jest zawsze tą "porządną" (temat grupy albo wpis z książki
+ * adresowej), nigdy sformatowanym numerem telefonu - dzwoniący traktuje ją
+ * jako NameTier.SAVED.
+ */
+export async function readChatSubject(client: WaClient, chatId: string): Promise<string | null> {
+    const page = client.pupPage;
+    if (!page || typeof page.evaluate !== 'function') return null;
+
+    let name: unknown;
+    try {
+        name = await page.evaluate((id: string): string | null => {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const root = globalThis as any;
+            const win = root.window ?? root;
+            const store = win.Store;
+            if (!store) return null;
+
+            const text = (value: unknown): string | null => {
+                const clean = typeof value === 'string' ? value.trim() : '';
+                return clean.length > 0 ? clean : null;
+            };
+
+            let wid: any = null;
+            try {
+                wid = store.WidFactory?.createWid?.(id) ?? null;
+            } catch {
+                wid = null;
+            }
+
+            // Sam get(), bez findOrCreate - inaczej pytanie o nazwę zakładałoby
+            // przy okazji pusty czat, którego WhatsApp wcześniej nie miał.
+            const pick = (collection: any): any => {
+                for (const key of [wid, id]) {
+                    if (!key) continue;
+                    try {
+                        const found = collection?.get?.(key);
+                        if (found) return found;
+                    } catch {
+                        /* następna postać identyfikatora */
+                    }
+                }
+                return null;
+            };
+
+            const isGroup = id.endsWith('@g.us');
+
+            // formattedTitle grupy to jej temat, ale dla rozmowy z jedną
+            // osobą jest to sformatowany numer ("+48 880 969 041"). Taka
+            // nazwa udawałaby wpis z książki adresowej, więc poza grupami
+            // jej nie tykamy.
+            const chat = pick(store.Chat);
+            for (const key of isGroup ? ['formattedTitle', 'subject', 'name'] : ['name']) {
+                try {
+                    // Te pola bywają getterami liczonymi z kontaktu i potrafią
+                    // rzucić - wtedy próbujemy po prostu następnego.
+                    const found = text(chat?.[key]);
+                    if (found) return found;
+                } catch {
+                    /* następne pole */
+                }
+            }
+
+            // Grupa: temat leży w metadanych nawet wtedy, gdy model czatu go
+            // jeszcze nie zna. To jest ta ścieżka, której brakowało.
+            if (isGroup) {
+                try {
+                    const subject = text(pick(store.GroupMetadata)?.subject);
+                    if (subject) return subject;
+                } catch {
+                    /* brak metadanych to nie awaria */
+                }
+                return null;
+            }
+
+            // Wyłącznie nazwy, które faktycznie ktoś nadał: zapisana
+            // w książce adresowej i zweryfikowana nazwa firmowa. Reszta pól
+            // kontaktu spada na numer telefonu.
+            const contact = pick(store.Contact);
+            for (const key of ['name', 'verifiedName']) {
+                try {
+                    const found = text(contact?.[key]);
+                    if (found) return found;
+                } catch {
+                    /* następne pole */
+                }
+            }
+
+            return null;
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+        }, chatId);
+    } catch (err) {
+        log.quiet(err, { stage: 'nazwa czatu ze Store', chat: chatId });
+        return null;
+    }
+
+    return typeof name === 'string' && name.trim().length > 0 ? name.trim() : null;
+}
+
+/**
+ * Adres zdjęcia profilowego bez Client.getProfilePicUrl().
+ *
+ * Publiczne wywołanie schodzi do requestProfilePicFromServer(), a ten
+ * w bieżącym wydaniu WhatsApp Weba wywraca się na "Cannot read properties of
+ * undefined (reading 'isNewsletter')" - i to dla każdego kontaktu po kolei,
+ * więc w archiwum nie było ani jednego zdjęcia. Miniatura leży już w kolekcji
+ * ProfilePicThumb; pytanie serwera zostaje planem awaryjnym, ale jego awaria
+ * nie zabiera już całego pobierania.
+ */
+export async function readProfilePicUrl(client: WaClient, chatId: string): Promise<string | null> {
+    const page = client.pupPage;
+    if (!page || typeof page.evaluate !== 'function') return null;
+
+    let url: unknown;
+    try {
+        url = await page.evaluate(async (id: string): Promise<string | null> => {
+            /* eslint-disable @typescript-eslint/no-explicit-any */
+            const root = globalThis as any;
+            const win = root.window ?? root;
+            const store = win.Store;
+            if (!store) return null;
+
+            const address = (thumb: any): string | null => {
+                for (const key of ['eurl', 'imgFull', 'img']) {
+                    const value = thumb?.[key];
+                    if (typeof value === 'string' && value.startsWith('http')) return value;
+                }
+                return null;
+            };
+
+            let wid: any = null;
+            try {
+                wid = store.WidFactory?.createWid?.(id) ?? null;
+            } catch {
+                wid = null;
+            }
+
+            // 1. To, co przeglądarka już ma - bez jednego zapytania do sieci.
+            for (const key of [wid, id]) {
+                if (!key) continue;
+                try {
+                    const found = address(store.ProfilePicThumb?.get?.(key));
+                    if (found) return found;
+                } catch {
+                    /* następna postać identyfikatora */
+                }
+            }
+
+            // 2. Kolekcja potrafi sama dociągnąć miniaturę z serwera.
+            for (const key of [wid, id]) {
+                if (!key) continue;
+                try {
+                    const found = address(await store.ProfilePicThumb?.find?.(key));
+                    if (found) return found;
+                } catch {
+                    /* następna postać identyfikatora */
+                }
+            }
+
+            // 3. Droga biblioteki. Bywa, że tylko ona zna świeże zdjęcie,
+            // ale jej wyjątek nie może już przewrócić całego pobierania.
+            if (wid) {
+                for (const ask of [
+                    store.ProfilePic?.requestProfilePicFromServer,
+                    store.ProfilePic?.profilePicFind,
+                ]) {
+                    if (typeof ask !== 'function') continue;
+                    try {
+                        const found = address(await ask.call(store.ProfilePic, wid));
+                        if (found) return found;
+                    } catch {
+                        /* następna droga */
+                    }
+                }
+            }
+
+            return null;
+            /* eslint-enable @typescript-eslint/no-explicit-any */
+        }, chatId);
+    } catch (err) {
+        log.quiet(err, { stage: 'zdjęcie profilowe ze Store', chat: chatId });
+        return null;
+    }
+
+    return typeof url === 'string' && url.length > 0 ? url : null;
+}
+
 function chatSummaries(value: unknown): RawChatSummary[] | null {
     if (!Array.isArray(value)) return null;
 
@@ -593,10 +887,20 @@ function chatSummaries(value: unknown): RawChatSummary[] | null {
     const result: RawChatSummary[] = [];
     for (const item of value) {
         if (!item || typeof item !== 'object') continue;
-        const { id, name } = item as { id?: unknown; name?: unknown };
+        const { id, name, lastActivity, unread } = item as {
+            id?: unknown;
+            name?: unknown;
+            lastActivity?: unknown;
+            unread?: unknown;
+        };
         if (typeof id !== 'string' || id.length === 0 || seen.has(id)) continue;
         seen.add(id);
-        result.push({ id, name: typeof name === 'string' ? name : '' });
+        result.push({
+            id,
+            name: typeof name === 'string' ? name : '',
+            lastActivity: typeof lastActivity === 'number' && Number.isFinite(lastActivity) ? lastActivity : 0,
+            unread: typeof unread === 'number' && Number.isFinite(unread) ? unread : 0,
+        });
     }
     // Pusta lista to nie jest odpowiedź, na której da się polegać - lepiej
     // spróbować publicznego API niż uznać, że nie ma żadnych czatów.

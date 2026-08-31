@@ -53,6 +53,10 @@ export interface Config {
     panelEnabled: boolean;
     panelHost: string;
     panelPort: number;
+    /** Wpuszczaj do panelu wyłącznie klientów z sieci lokalnej. */
+    panelLanOnly: boolean;
+    /** Dodatkowe adresy lub zakresy CIDR poza sieciami prywatnymi, np. VPN. */
+    panelAllowedIps: string[];
 
     /** Prywatny asystent ?tau korzystający z numeru ChatGPT w WhatsAppie. */
     tauEnabled: boolean;
@@ -110,6 +114,14 @@ function raw(env: Env, key: string): string | null {
 
 function readText(env: Env, key: string, fallback = ''): string {
     return raw(env, key) ?? fallback;
+}
+
+/** Lista po przecinku, bez pustych wpisów - np. adresy dopuszczone do panelu. */
+function readList(env: Env, key: string): string[] {
+    return readText(env, key)
+        .split(',')
+        .map((item) => item.trim())
+        .filter((item) => item.length > 0);
 }
 
 function readBool(env: Env, key: string, fallback: boolean, warnings: string[]): boolean {
@@ -213,6 +225,8 @@ const KNOWN_KEYS = new Set([
     'PANEL_ENABLED',
     'PANEL_HOST',
     'PANEL_PORT',
+    'PANEL_LAN_ONLY',
+    'PANEL_ALLOWED_IPS',
     'TAU_ENABLED',
     'TAU_PROVIDER_NUMBER',
     'TAU_TIMEOUT_SECONDS',
@@ -297,6 +311,8 @@ export function loadConfig(rootDir: string, env: Env = process.env): LoadResult 
         panelEnabled: readBool(env, 'PANEL_ENABLED', true, warnings),
         panelHost: readText(env, 'PANEL_HOST', '127.0.0.1'),
         panelPort: readNumber(env, 'PANEL_PORT', 3000, warnings, { min: 1, max: 65535 }),
+        panelLanOnly: readBool(env, 'PANEL_LAN_ONLY', true, warnings),
+        panelAllowedIps: readList(env, 'PANEL_ALLOWED_IPS'),
 
         tauEnabled: readBool(env, 'TAU_ENABLED', false, warnings),
         tauProviderNumber: readText(env, 'TAU_PROVIDER_NUMBER', '18002428478').replace(/\D/g, ''),
@@ -334,6 +350,14 @@ export function loadConfig(rootDir: string, env: Env = process.env): LoadResult 
     if (config.panelHost && (config.panelHost.includes('/') || /:[0-9]+$/.test(config.panelHost))) {
         warnings.push(
             `PANEL_HOST=${config.panelHost} - podaj sam adres, bez http:// i bez portu (port ustawia PANEL_PORT)`,
+        );
+    }
+    // Adres nasłuchu niczego nie chroni, gdy router przekazuje ruch z
+    // internetu na ten sam adres LAN (DMZ, przekierowanie portu).
+    if (config.panelEnabled && !config.panelLanOnly && config.panelHost !== '127.0.0.1') {
+        warnings.push(
+            `PANEL_LAN_ONLY=false przy PANEL_HOST=${config.panelHost} - panel przyjmie połączenie ` +
+                'z dowolnego adresu, także z internetu, jeżeli router go tu przekazuje',
         );
     }
     if (

@@ -86,23 +86,63 @@ export function readJsonSync<T>(file: string): T | null {
 }
 
 /**
- * Zapis JSON-a przez plik tymczasowy i zmianę nazwy. Przerwany zapis
- * zostawiłby obcięty _state.json, a razem z nim wszystkie oczekujące
- * wiadomości czatu - dlatego podmiana jest niepodzielna.
+ * Trwające zapisy, po jednym łańcuchu na plik.
+ *
+ * Dwa równoległe zapisy tego samego pliku to nie teoria: historię zdjęć
+ * profilowych zapisuje jednocześnie przegląd cykliczny i wiadomość, która
+ * właśnie przyszła. Przy wspólnej nazwie pliku tymczasowego pierwszy z nich
+ * zabierał plik drugiemu i ten kończył się błędem ENOENT przy rename().
+ * Kolejka dodatkowo gwarantuje, że wygrywa zapis rozpoczęty jako ostatni,
+ * a nie ten, który akurat pierwszy dobiegł do rename().
  */
-export async function writeJsonAtomic(file: string, data: unknown): Promise<void> {
+const writeQueues = new Map<string, Promise<void>>();
+
+/** Licznik do nazw plików tymczasowych - unikalnych w obrębie procesu. */
+let tempCounter = 0;
+
+/** Ustawia zapis w kolejce tego pliku i sprząta kolejkę po ostatnim z nich. */
+function queueWrite(file: string, write: () => Promise<void>): Promise<void> {
+    const previous = writeQueues.get(file) ?? Promise.resolve();
+    // Poprzedni zapis mógł się wywrócić - jego błąd należy do jego wywołania,
+    // więc tutaj tylko czekamy na koniec, bez przejmowania wyniku.
+    const current = previous.then(write, write);
+
+    const settled = current.catch(() => undefined).then(() => {
+        if (writeQueues.get(file) === settled) writeQueues.delete(file);
+    });
+    writeQueues.set(file, settled);
+
+    return current;
+}
+
+/**
+ * Zapis przez plik tymczasowy i zmianę nazwy. Przerwany zapis zostawiłby
+ * obcięty _state.json, a razem z nim wszystkie oczekujące wiadomości czatu -
+ * dlatego podmiana jest niepodzielna.
+ *
+ * Nazwa pliku tymczasowego zawiera PID i licznik, więc drugi proces piszący
+ * do tego samego archiwum też nie zabierze nam pliku sprzed rename().
+ */
+async function writeAtomic(file: string, contents: string): Promise<void> {
     await ensureDir(path.dirname(file));
-    const temp = `${file}.tmp`;
-    await fs.writeFile(temp, JSON.stringify(data, null, 2), 'utf8');
-    await fs.rename(temp, file);
+    const temp = `${file}.${process.pid.toString(36)}.${(tempCounter++).toString(36)}.tmp`;
+    try {
+        await fs.writeFile(temp, contents, 'utf8');
+        await fs.rename(temp, file);
+    } catch (err) {
+        // Nieudany zapis nie ma prawa zostawić śmiecia obok archiwum.
+        await fs.rm(temp, { force: true }).catch(() => undefined);
+        throw err;
+    }
+}
+
+export function writeJsonAtomic(file: string, data: unknown): Promise<void> {
+    return queueWrite(file, () => writeAtomic(file, JSON.stringify(data, null, 2)));
 }
 
 /** Tak samo niepodzielnie, ale dla zwykłego tekstu (pliki HTML). */
-export async function writeFileAtomic(file: string, contents: string): Promise<void> {
-    await ensureDir(path.dirname(file));
-    const temp = `${file}.tmp`;
-    await fs.writeFile(temp, contents, 'utf8');
-    await fs.rename(temp, file);
+export function writeFileAtomic(file: string, contents: string): Promise<void> {
+    return queueWrite(file, () => writeAtomic(file, contents));
 }
 
 export async function remove(target: string): Promise<void> {

@@ -271,15 +271,19 @@ class Runtime {
 
         await this.tryUnlockLockedChats();
 
-        // Świeża instalacja: w logach nie ma jeszcze ani jednej rozmowy.
-        // Pierwszy przebieg bierze wtedy wszystko, co WhatsApp Web udostępnia,
-        // razem z rozmowami sprzed czasów, gdy ten program w ogóle istniał.
-        const firstRun = !this.backfillAll && this.archive.isEmpty;
-        if (firstRun) {
-            log.info('Archiwum jest puste - pierwsze uruchomienie nadrabia całą dostępną historię.');
+        // Pełną historię pobiera wyłącznie jawne --nadrob-wszystko. Zwykły
+        // start - także pierwszy, na pustym archiwum - dotyka tylko rozmów,
+        // które mają już swój folder w logs/. Wcześniej puste archiwum samo
+        // włączało tryb pełny: jedno uruchomienie zakładało foldery całej
+        // książce adresowej i mieliło setki czatów bez historii.
+        if (!this.backfillAll && this.archive.isEmpty) {
+            log.info(
+                'Archiwum jest puste - zwykły start nie ma czego nadrabiać. ' +
+                    'Całą dostępną historię pobierze "npm start -- --nadrob-wszystko".',
+            );
         }
 
-        const backfill = await this.backfillMessages(this.backfillAll || firstRun);
+        const backfill = await this.backfillMessages(this.backfillAll);
 
         if (this.backfillAll) {
             const failed =
@@ -316,7 +320,8 @@ class Runtime {
         log.info(
             includeNewChats
                 ? 'Pełne nadrabianie: pobieram wszystkie rozmowy i całą historię dostępną w WhatsApp Web...'
-                : `Nadrabianie wiadomości: sprawdzam do ${this.config.backfillMessagesPerChat} w czatach obecnych w archiwum...`,
+                : `Nadrabianie wiadomości: sprawdzam do ${this.config.backfillMessagesPerChat} ` +
+                  'ostatnich wiadomości w rozmowach, które mają już folder w archiwum...',
         );
         const stats = await this.archive.backfillRecent(
             Math.max(this.config.backfillMessagesPerChat, 250),
@@ -584,6 +589,22 @@ class Runtime {
             if (stats.changed > 0) log.info(`Zdjęcia profilowe: nowych wersji ${stats.changed}.`);
         } catch (err) {
             log.error('Błąd odświeżania zdjęć profilowych', err, { stage: 'przegląd zdjęć' });
+        }
+
+        // Pliki, których WhatsApp nie oddał przy zapisie. Telefon zwykle
+        // wysyła je ponownie w ciągu kilku godzin, więc notatka "nie udało
+        // się pobrać pliku" nie musi zostać w archiwum na zawsze.
+        try {
+            const stats = await this.archive.retryFailedMedia();
+            if (stats.recovered > 0) {
+                log.info(
+                    `Zaległe pliki: odzyskano ${stats.recovered} z ${stats.tried}` +
+                        (stats.waiting > 0 ? `, czeka jeszcze ${stats.waiting}` : '') +
+                        '.',
+                );
+            }
+        } catch (err) {
+            log.error('Błąd ponownego pobierania plików', err, { stage: 'zaległe pliki' });
         }
     }
 

@@ -14,8 +14,11 @@ import type { ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
+import type { Server } from 'node:http';
 import { isOneShot, normalizeCliArgs } from '../src/cli';
+import type { Config } from '../src/config';
 import { loadConfig } from '../src/config';
+import { createLanGuard, findFreePort } from '../src/lanGuard';
 import { decideLoggerRestart } from '../src/restart';
 
 const ROOT_DIR = path.resolve(__dirname, '..', '..');
@@ -40,6 +43,8 @@ const loggerArgs = normalizeCliArgs(process.argv.slice(2), process.env);
 const oneShot = isOneShot(loggerArgs);
 
 const children: Array<{ name: string; child: ChildProcess }> = [];
+/** Bramka wpuszczająca do panelu tylko sieć lokalną - null, gdy wyłączona. */
+let guard: Server | null = null;
 let stopping = false;
 let restartAttempts: number[] = [];
 let restartTimer: NodeJS.Timeout | null = null;
@@ -66,7 +71,7 @@ function main(): void {
         return;
     }
     ostrzezOBrakuKlucza();
-    startPanel(config.logsDir, config.panelHost, config.panelPort);
+    startPanel(config);
 }
 
 /**
@@ -99,12 +104,29 @@ function startLogger(): void {
     track('logger', child);
 }
 
-function startPanel(logsDir: string, host: string, port: number): void {
+function startPanel(config: Config): void {
+    void preparePanel(config).catch((err: unknown) => {
+        const powod = err instanceof Error ? err.message : String(err);
+        console.error(`[panel] nie udało się przygotować uruchomienia: ${powod}`);
+        stopAll(1);
+    });
+}
+
+/**
+ * Z włączoną bramką Next.js słucha wyłącznie na pętli zwrotnej, a z sieci
+ * widać tylko bramkę - dzięki temu przekierowanie portu albo DMZ na routerze
+ * nie wystawia archiwum całemu internetowi. Bez bramki wszystko zostaje po
+ * staremu: panel sam siada na PANEL_HOST:PANEL_PORT.
+ */
+async function preparePanel(config: Config): Promise<void> {
+    const listenHost = config.panelLanOnly ? '127.0.0.1' : config.panelHost;
+    const listenPort = config.panelLanOnly ? await findFreePort() : config.panelPort;
+
     const env = {
         ...process.env,
-        LOGS_DIR: logsDir,
-        HOSTNAME: host,
-        PORT: String(port),
+        LOGS_DIR: config.logsDir,
+        HOSTNAME: listenHost,
+        PORT: String(listenPort),
     };
 
     // Budujemy przy każdym zwykłym npm start. Dzięki temu zmiana w panelu nie
@@ -125,7 +147,9 @@ function startPanel(logsDir: string, host: string, port: number): void {
             return;
         }
         console.log('[panel] zbudowany.');
-        runPanel(env, host, port);
+        runPanel(env, listenHost, listenPort);
+        if (config.panelLanOnly) startGuard(config, listenPort);
+        console.log(`[panel] archiwum pod adresem ${adresPanelu(config.panelHost, config.panelPort)}`);
     });
 }
 
@@ -138,8 +162,38 @@ function runPanel(env: NodeJS.ProcessEnv, host: string, port: number): void {
 
     prefix(child, '[panel]');
     track('panel', child);
+}
 
-    console.log(`[panel] archiwum pod adresem ${adresPanelu(host, port)}`);
+/** Stawia bramkę przed panelem i mówi, co dokładnie przepuszcza. */
+function startGuard(config: Config, targetPort: number): void {
+    // Skaner potrafi pukać setki razy - jeden adres wypisujemy raz.
+    const odrzucone = new Set<string>();
+
+    guard = createLanGuard({
+        host: config.panelHost,
+        port: config.panelPort,
+        targetHost: '127.0.0.1',
+        targetPort,
+        allowed: config.panelAllowedIps,
+        onBlocked: (address) => {
+            if (odrzucone.has(address) || odrzucone.size >= 50) return;
+            odrzucone.add(address);
+            console.log(`[panel] odrzucono połączenie spoza sieci lokalnej: ${address}`);
+        },
+    });
+
+    guard.on('error', (err: Error) => {
+        console.error(
+            `[panel] bramka nie wstała na ${config.panelHost}:${String(config.panelPort)}: ${err.message}`,
+        );
+        stopAll(1);
+    });
+
+    const dodatkowe =
+        config.panelAllowedIps.length > 0
+            ? ` Dopuszczone dodatkowo: ${config.panelAllowedIps.join(', ')}.`
+            : '';
+    console.log(`[panel] wejście tylko z sieci lokalnej.${dodatkowe}`);
 }
 
 /**
@@ -236,6 +290,10 @@ function stopAll(code: number): void {
     if (restartTimer) {
         clearTimeout(restartTimer);
         restartTimer = null;
+    }
+    if (guard) {
+        guard.close();
+        guard = null;
     }
 
     for (const { name, child } of children) {

@@ -11,6 +11,7 @@
 
 import { log } from './log';
 import { NameTier } from './types';
+import { readChatSubject } from './waClient';
 import type { ChatIdentity, WaClient, WaContact, WaMessage } from './types';
 import { phoneDigits } from './util';
 
@@ -114,23 +115,40 @@ export class IdentityResolver {
         return null;
     }
 
-    /** Nazwa czatu z getChat(). Przy @lid nie wołane - patrz resolve(). */
+    /**
+     * Nazwa czatu z getChat(). Przy @lid nie wołane - patrz resolve().
+     *
+     * getChat() serializuje cały model rozmowy i dla grupy bez dociągniętych
+     * metadanych kończy się zminifikowanym "r: r" - grupa zostawała wtedy
+     * w archiwum pod samym identyfikatorem. Dlatego zarówno po nieudanym
+     * wywołaniu, jak i po pustej odpowiedzi pytamy jeszcze Store wprost
+     * o sam tytuł. Ten odczyt jest tani i nie ma się na czym wywrócić.
+     */
     private async chatNameOf(message: WaMessage | null, rawId: string): Promise<string | null> {
-        if (!message || typeof message.getChat !== 'function') return null;
-
         const failedAt = this.badChats.get(rawId);
-        if (failedAt !== undefined && Date.now() - failedAt < CONTACT_RETRY_MS) return null;
+        const cooling = failedAt !== undefined && Date.now() - failedAt < CONTACT_RETRY_MS;
 
-        try {
-            const chat = await message.getChat();
-            this.badChats.delete(rawId);
-            const name = chat?.name?.trim();
-            return name && name.length > 0 ? name : null;
-        } catch (err) {
-            this.badChats.set(rawId, Date.now());
-            log.quiet(err, { stage: 'getChat', chat: rawId });
-            return null;
+        if (message && typeof message.getChat === 'function' && !cooling) {
+            try {
+                const chat = await message.getChat();
+                this.badChats.delete(rawId);
+                const name = chat?.name?.trim();
+                if (name && name.length > 0) return name;
+            } catch (err) {
+                this.badChats.set(rawId, Date.now());
+                log.quiet(err, { stage: 'getChat', chat: rawId });
+            }
         }
+
+        // Tylko dla grup. Dla rozmowy z jedną osobą Store oddałby
+        // formattedTitle, a to dla nierozpoznanego numeru jest po prostu
+        // "+48 880 969 041" - nazwa gorsza niż numer, którym i tak
+        // prowadzimy taki czat, a przy tym udająca wpis z książki adresowej.
+        if (!rawId.endsWith('@g.us')) return null;
+
+        const subject = await readChatSubject(this.client, rawId);
+        if (subject) this.badChats.delete(rawId);
+        return subject;
     }
 
     /**

@@ -13,7 +13,9 @@ import {
     listContactChatIds,
     listStatusMessages,
     prepareFullHistoryScan,
+    readChatSubject,
     readFullHistoryBatch,
+    readProfilePicUrl,
     waitForContacts,
 } from '../src/waClient';
 import { messageKey } from '../src/identity';
@@ -366,8 +368,8 @@ test('surowa lista czatów pomija wadliwy model, zamiast paść razem z nim', as
     );
 
     assert.deepEqual(result, [
-        { id: '5550100@c.us', name: 'Albert' },
-        { id: 'grupa@g.us', name: '' },
+        { id: '5550100@c.us', name: 'Albert', lastActivity: 0, unread: 0 },
+        { id: 'grupa@g.us', name: '', lastActivity: 0, unread: 0 },
     ]);
 });
 
@@ -386,7 +388,7 @@ test('brak Store.Chat nie kończy listy czatów - zostaje moduł WhatsApp Weba',
         (client) => listChatsRaw(client),
     );
 
-    assert.deepEqual(result, [{ id: '5550100@c.us', name: 'Albert' }]);
+    assert.deepEqual(result, [{ id: '5550100@c.us', name: 'Albert', lastActivity: 0, unread: 0 }]);
 });
 
 test('pusta kolekcja czatów nie udaje odpowiedzi, na której da się polegać', async () => {
@@ -493,4 +495,117 @@ test('relacje czytamy wprost z kolekcji, a jedna wadliwa nie zabiera reszty', as
     );
 
     assert.deepEqual(result?.map((message) => messageKey(message)), ['relacja-1', 'relacja-2']);
+});
+
+// ── Nazwa czatu i zdjęcie profilowe wprost ze Store ──────────────────────
+
+/** Kolekcja Store w kształcie, jakiego używa odczyt po identyfikatorze. */
+function byId(entries: Record<string, unknown>): { get(key: unknown): unknown } {
+    return { get: (key: unknown) => entries[String(key)] ?? undefined };
+}
+
+test('nazwa grupy przychodzi z modelu czatu, bez serializacji', async () => {
+    const result = await withFakeWindow(
+        {
+            Store: {
+                WidFactory: { createWid: (id: string) => id },
+                Chat: byId({ 'grupa@g.us': { formattedTitle: '  Ekipa z pracy  ' } }),
+            },
+        },
+        (client) => readChatSubject(client, 'grupa@g.us'),
+    );
+
+    assert.equal(result, 'Ekipa z pracy');
+});
+
+test('gdy modelu grupy nie ma, tytuł bierzemy z jej metadanych', async () => {
+    // Dokładnie ta sytuacja, w której getChat() kończył się błędem "r: r",
+    // a grupa zostawała w archiwum pod samym identyfikatorem.
+    const result = await withFakeWindow(
+        {
+            Store: {
+                WidFactory: { createWid: (id: string) => id },
+                Chat: {
+                    get() {
+                        throw new Error('r: r');
+                    },
+                },
+                GroupMetadata: byId({ 'grupa@g.us': { subject: 'Ekipa z pracy' } }),
+            },
+        },
+        (client) => readChatSubject(client, 'grupa@g.us'),
+    );
+
+    assert.equal(result, 'Ekipa z pracy');
+});
+
+test('wywrotka na getterze nazwy nie kończy odczytu tytułu', async () => {
+    const chat = {
+        get formattedTitle(): string {
+            throw new Error('r: r');
+        },
+        name: 'Ekipa z pracy',
+    };
+
+    const result = await withFakeWindow(
+        {
+            Store: {
+                WidFactory: { createWid: (id: string) => id },
+                Chat: byId({ 'grupa@g.us': chat }),
+            },
+        },
+        (client) => readChatSubject(client, 'grupa@g.us'),
+    );
+
+    assert.equal(result, 'Ekipa z pracy');
+});
+
+test('zdjęcie profilowe bierzemy z miniatury, bez pytania serwera', async () => {
+    let pytaniaDoSerwera = 0;
+
+    const result = await withFakeWindow(
+        {
+            Store: {
+                WidFactory: { createWid: (id: string) => id },
+                ProfilePicThumb: byId({
+                    '5550100@c.us': { eurl: 'https://pps.whatsapp.net/miniatura.jpg' },
+                }),
+                ProfilePic: {
+                    requestProfilePicFromServer(): never {
+                        pytaniaDoSerwera++;
+                        throw new Error("Cannot read properties of undefined (reading 'isNewsletter')");
+                    },
+                },
+            },
+        },
+        (client) => readProfilePicUrl(client, '5550100@c.us'),
+    );
+
+    assert.equal(result, 'https://pps.whatsapp.net/miniatura.jpg');
+    assert.equal(pytaniaDoSerwera, 0);
+});
+
+test('awaria requestProfilePicFromServer nie przewraca pobierania zdjęcia', async () => {
+    // Ten wyjątek leciał dla każdego kontaktu po kolei i w archiwum nie
+    // zapisywało się ani jedno zdjęcie profilowe.
+    const result = await withFakeWindow(
+        {
+            Store: {
+                WidFactory: { createWid: (id: string) => id },
+                ProfilePicThumb: {
+                    get: () => undefined,
+                    find: () => undefined,
+                },
+                ProfilePic: {
+                    requestProfilePicFromServer(): never {
+                        throw new Error("Cannot read properties of undefined (reading 'isNewsletter')");
+                    },
+                    profilePicFind: () => ({ eurl: 'https://pps.whatsapp.net/zapasowa.jpg' }),
+                },
+            },
+        },
+        (client) => readProfilePicUrl(client, '5550100@c.us'),
+    );
+
+    assert.equal(result, 'https://pps.whatsapp.net/zapasowa.jpg');
 });
