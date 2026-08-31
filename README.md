@@ -10,6 +10,7 @@ Projekt jest przeznaczony do tworzenia kopii własnych rozmów. Korzysta z nieof
 - pasywne archiwizowanie bez oznaczania rozmów jako przeczytane;
 - pobieranie zdjęć, filmów, dokumentów, naklejek i nagrań głosowych;
 - archiwizacja relacji oraz historii zdjęć profilowych;
+- znacznik doręczenia i odczytania własnych wiadomości, z godziną odczytu;
 - nadrabianie ostatnich wiadomości po ponownym uruchomieniu, w rozmowach, które mają już folder w archiwum;
 - ponawianie plików, których WhatsApp nie oddał za pierwszym razem;
 - panel dostępny wyłącznie z sieci lokalnej;
@@ -171,6 +172,7 @@ Ważne ograniczenia:
 | `npm start` | Buduje logger oraz panel z obecnych plików, a następnie uruchamia oba procesy. Nie wykonuje `npm install`. |
 | `npm start -- --sprawdz` | Sprawdza konfigurację i kończy pracę bez łączenia z WhatsAppem. |
 | `npm start -- --sprawdz-archiwum` | Kontroluje strukturę JSON, duplikaty i brakujące pliki. |
+| `npm start -- --sprawdz-media` | Łączy się z WhatsApp Web i pokazuje krok po kroku, dlaczego nie idą pliki. |
 | `npm start -- --nadrob-wszystko` | Jednorazowo nadrabia także czaty, które nie mają jeszcze folderu. |
 | `npm start -- --baza` | Sprawdza bazę i tworzy tabele. |
 | `npm start -- --uzytkownik` | Tworzy konto panelu lub zmienia jego hasło. |
@@ -224,7 +226,26 @@ Notatka mówi też, **co dokładnie** poszło nie tak - inaczej jedno „nie uda
 | `serwer mediów WhatsAppa odpowiedział 404` | Adres `directPath` wygasł. Przy backfillu starej historii to stan normalny. |
 | `pobieranie z serwera mediów nie doszło do skutku: …` | Chromium nie dopchał się do serwera mediów. **Jeżeli powtarza się przy każdym pliku, przyczyna jest po stronie sieci serwera, a nie WhatsAppa** - to inny host niż `web.whatsapp.com`, więc samo działające połączenie z WhatsApp Web niczego nie dowodzi. |
 | `wiadomości nie ma już w pamięci przeglądarki` | Strona się przeładowała albo wiadomość wypadła ze Store. |
+| `wnętrze WhatsApp Weba niedostępne (…)` | Strona jest w trakcie przeładowania i nie oddaje jeszcze swoich modułów. Stan przejściowy - kolejka ponowień załatwia to sama. |
 | `WhatsApp nie ma już adresu ani klucza do tego pliku` | Brak `directPath`/`mediaKey` - plik przepadł bezpowrotnie. |
+
+### Przeładowanie strony WhatsApp Weba
+
+`whatsapp-web.js` składa `window.Store` i `window.WWebJS` raz, przy wstrzyknięciu. Gdy strona WhatsApp Weba się przeładuje - a robi to sama, przy aktualizacji i po chwilowej utracie łącza - oba obiekty znikają razem z dokumentem, a biblioteka odtwarza je dopiero we własnej obsłudze `framenavigated`.
+
+W tej dziurze przestawało działać wszystko, co sięga do wnętrza strony, i to na trzy różne sposoby: pliki kończyły się notatką „przeglądarka nie ma jeszcze Store WhatsAppa", zdjęcia profilowe po cichu zwracały `null`, a przegląd relacji uznawał, że relacji nie ma.
+
+Logger nie czeka już na bibliotekę. Sam rejestr modułów WhatsApp Weba (`window.require`) przeładowania nie traci - należy do WhatsAppa, nie do biblioteki - więc brakujące kolekcje składane są wprost z niego (`src/pageStore.ts`). Pomocnik siedzi pod własną nazwą, a nie pod `window.Store`: gdyby podszył się pod obiekt biblioteki, ta uznałaby przy najbliższym `framenavigated`, że wstrzyknięcie jest już zrobione, i nie podpięłaby z powrotem nasłuchu na nowe wiadomości.
+
+Skąd biorą się kolekcje w danej chwili, pokazuje `npm start -- --sprawdz-media` w wierszu „Wnętrze WhatsApp Weba".
+
+### Gdy pliki nie idą w ogóle
+
+```bash
+npm start -- --sprawdz-media
+```
+
+Polecenie łączy się z żywą sesją i pokazuje dla kilku wiadomości z kolejki oraz kilku relacji: co WhatsApp Web trzyma w modelu (etap, `directPath`, `mediaKey`, gotowy plik w przeglądarce), co oddaje `message.downloadMedia()` z biblioteki i co oddaje odczyt wprost ze `Store`. Na początku sprawdza jeszcze, czy Chromium w ogóle dosięga `mmg.whatsapp.net` - bo pliki idą z innego hosta niż sama strona i działający panel niczego o nich nie dowodzi.
 
 Logger próbuje temu zapobiec na dwa sposoby. Przy zapisie czeka w przeglądarce na zakończenie pobierania zamiast poprzestawać na pustej odpowiedzi, prosi telefon o ponowne wysłanie wygasłego pliku i szuka wiadomości także przez `getMessagesById`, gdy nie ma jej już w pamięci strony. Na żywo czeka krótko (8 s), bo kolejka czatu stoi; w przeglądzie zaległości długo (45 s), bo tam nikt nie czeka, a tyle właśnie zajmuje telefonowi ponowne wysłanie zdjęcia.
 
@@ -235,6 +256,23 @@ Zaległe pliki: odzyskano 2 z 5, czeka jeszcze 3.
 ```
 
 Do jednej wiadomości logger wraca najwyżej osiem razy i nie dłużej niż przez 14 dni - po tym czasie plik na pewno wygasł po stronie WhatsAppa i notatka zostaje na stałe. Notatki o plikach pominiętych świadomie (wyłączony typ, przekroczony `MAX_MEDIA_SIZE_MB`) do kolejki nie trafiają.
+
+## Doręczenie i odczytanie własnych wiadomości
+
+Przy każdej wysłanej przez Ciebie wiadomości archiwum pokazuje to, co w WhatsAppie mówią dwa „ptaszki" - tyle że z godziną:
+
+```text
+Dostarczona 19:12      plik doszedł na telefon odbiorcy
+Przeczytana 19:47      odbiorca otworzył rozmowę
+```
+
+Znacznik jest w panelu i w plikach HTML, w wierszu z godziną wiadomości. Pod kursorem pokazuje pełną datę. Cudze wiadomości go nie mają - „przeczytana" znaczyłoby tam tylko tyle, że to Ty ją otworzyłeś.
+
+**Skąd bierze się ta godzina i kiedy jej nie ma.** WhatsApp nie podaje momentu odczytu - podaje samą zmianę stanu, i to tylko wtedy, gdy program w danej chwili pracuje. Zapisujemy więc chwilę, w której logger tę zmianę zobaczył. Przy programie działającym bez przerwy różnica idzie w sekundy. Jeżeli wiadomość została odczytana w czasie postoju loggera, w archiwum zostaje samo „Przeczytana", bez godziny - i tak też jest opisana w podpowiedzi. To nie jest brak do naprawienia, tylko uczciwe „wiem, że przeczytał, nie wiem kiedy"; wpisanie tam czegokolwiek innego byłoby zmyślaniem.
+
+W grupach WhatsApp zgłasza odczytanie dopiero wtedy, gdy wiadomość przeczytają **wszyscy** uczestnicy - tak samo jak niebieskie ptaszki w aplikacji.
+
+W danych stan siedzi w trzech polach wiadomości: `ack` (1 na serwerze, 2 na telefonie odbiorcy, 3 przeczytana, 4 odsłuchana), `deliveredAt` i `readAt`. W bazie odpowiadają im kolumny `ack`, `delivered_at` i `read_at`, dokładane do istniejącej instalacji przy starcie. Stan nigdy się nie cofa: po ponownym połączeniu z telefonem WhatsApp potrafi zgłosić go od nowa, a „Przeczytana" nie ma prawa przez to zniknąć z archiwum.
 
 ## Zabezpieczone czaty
 
@@ -247,6 +285,25 @@ Wiadomości przychodzące na żywo z zabezpieczonych czatów są archiwizowane r
 `LOCKED_CHAT_PASSWORD` służy do próby odsłonięcia czatu w sesji webowej, co może pozwolić także na nadrobienie jego wcześniejszej historii. Jeżeli pojawi się komunikat, że WhatsApp Web nie dostał kodu tajnego, nie oznacza to utraty nowych wiadomości - ograniczenie dotyczy historii ukrytej przed tą sesją.
 
 Kod tajny i lista zabezpieczonych czatów nie są zapisywane w archiwum.
+
+## Zamykanie i praca po zamknięciu SSH
+
+`npm start` uruchamia dwa procesy potomne (logger i panel), a logger trzyma jeszcze Chromium. Wszystkie trzy mają odejść razem z launcherem i pilnują tego trzy niezależne mechanizmy:
+
+- **sygnały** `SIGINT`, `SIGTERM` i `SIGHUP`. Ten ostatni przychodzi, gdy znika terminal - czyli przy każdym zamknięciu połączenia SSH. Wcześniej nie był obsługiwany: Node kończył launcher na miejscu, a dzieci zostawały jako sieroty pod PID 1;
+- **`process.on('exit')`** w launcherze - siatka na wypadek zakończenia z innego powodu niż sygnał;
+- **czujnik rodzica w loggerze**. Launcher przekazuje mu swój PID w `WA_LOGGER_PARENT_PID`; logger co 10 sekund sprawdza `process.ppid` i zamyka się razem z Chromium, gdy launcher zniknął. To ratuje sytuację, w której launcher został zabity twardo (`SIGKILL`) i nie zdążył nikomu nic powiedzieć. Uruchomiony wprost - z systemd albo z ręki - logger tej zmiennej nie ma i niczego nie pilnuje.
+
+Osierocony proces nie tylko zostaje w pamięci. Node z zamkniętym terminalem potrafi kręcić pętlą zdarzeń na martwych deskryptorach i wtedy jeden rdzeń idzie pod korek - na ośmiordzeniowym serwerze widać to jako stałe „12%", na pięciordzeniowym jako „20%", przy zerowej pracy programu.
+
+**Do pracy 24/7 nie zostawiaj `npm start` w sesji SSH.** Uruchom go bez terminala - wtedy `SIGHUP` w ogóle nie przychodzi, a zatrzymywanie jest jednym poleceniem zamiast szukania PID-ów:
+
+```bash
+# jednorazowo
+tmux new -s logger        # albo: systemd, patrz niżej
+npm start
+# odłączenie: Ctrl+B, potem D. Powrót: tmux attach -t logger
+```
 
 ## Automatyczne odzyskiwanie po awarii
 
@@ -420,6 +477,7 @@ Hook jest dodatkowym zabezpieczeniem, a nie zamiennikiem sprawdzenia zmian przed
 | Nadrabianie kończy się bez błędu, ale luka z czasu przerwy zostaje | WhatsApp trzyma tę samą rozmowę pod numerem telefonu i pod `@lid`, a historię oddaje tylko temu identyfikatorowi, który ma w `Store`. Drugi zakłada w locie pusty czat i nadrabianie wracało z zerem wiadomości. Teraz identyfikatory jednej rozmowy są grupowane po folderze archiwum, czytanie zaczyna się od znanego stronie, a pusty wynik kieruje do kolejnego aliasu. |
 | Zbiorcze pobranie czatów kończy się krótkim błędem `r: r` | Lista czatów i historia są czytane wprost z `Store`, z pominięciem serializacji modeli, która ten błąd wywołuje. Publiczne `getChats()` i `getChatById()` są używane dopiero jako plan awaryjny, a spis `logs/_czaty.json` jako ostatni. Zakres, którego nie udało się objąć, jest oznaczany jako niepełny, a liczba pominiętych czatów pojawia się w podsumowaniu. |
 | W archiwum jest notatka „nie udało się pobrać pliku" | Przeczytaj dalszą część powodu - to ona mówi, czy sprawa jest do naprawienia (tabela w [Pliki, których WhatsApp nie oddał od razu](#pliki-których-whatsapp-nie-oddał-od-razu)). Pobranie jest ponawiane, bo WhatsApp Web oddaje pustkę również w trakcie ściągania. Zanim logger sięgnie po `DownloadManager`, próbuje wziąć gotowy, rozszyfrowany plik, który przeglądarka trzyma po udanym pobraniu - ta droga nie potrzebuje `directPath` ani `mediaKey`, których wygasłe media czasem już nie mają. Pliku z relacji sprzed doby albo z bezpowrotnie wygasłego załącznika nie odzyska już nikt - notatka zostaje w archiwum wraz z typem i rozmiarem. |
+| Powodem niepobrania pliku jest `r: r` | To już nie powinno wystąpić. `r: r` to zminifikowany błąd **serializacji** modelu WhatsApp Web. Brał się z `message.reload()` w pętli ponowień - `reload()` przepuszcza wiadomość przez `getMessageModel()`, czyli przez `serialize()` - a padając jako ostatni, przykrywał prawdziwy powód. Odświeżanie modelu tą drogą zostało usunięte, a do notatki idzie teraz powód z odczytu wprost ze `Store`; treść wyjątku biblioteki trafia tam wyłącznie wtedy, gdy `Store` nie powiedział nic. |
 | Ten sam powód przy **każdym** pliku, we wszystkich czatach | To nie jest sprawa WhatsAppa, tylko sieci serwera. Pliki idą z `mmg.whatsapp.net`, nie z `web.whatsapp.com`, więc działający panel i wchodzące wiadomości niczego nie dowodzą. Sprawdź z serwera: `curl -sI https://mmg.whatsapp.net` - brak odpowiedzi znaczy, że zapora albo DNS odcina osobno host mediów. |
 | Zabezpieczony czat nie został odsłonięty | Nowe wiadomości nadal są zapisywane; WhatsApp Web może jedynie nie udostępnić wcześniejszej historii. |
 | Panel nie startuje | Uruchom `npm run panel:build`, a potem ponownie `npm start`. |

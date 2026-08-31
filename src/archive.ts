@@ -8,6 +8,7 @@
 import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { ackOf, applyAck } from './ack';
 import type { Config } from './config';
 import type { Database } from './db';
 import { toArchivePath as toDatabaseArchivePath, toMessageRow } from './db';
@@ -16,6 +17,7 @@ import {
     batchDataName,
     batchFileName,
     generateHtml,
+    markAckInHtml,
     markDeletedInHtml,
     NEXT_LINK_MARKER,
     buildNextLink,
@@ -238,6 +240,14 @@ interface ChatPlace {
     name: string;
 }
 
+/**
+ * Ile ostatnich partii przeszukujemy w poszukiwaniu wiadomości, której dotyczy
+ * potwierdzenie odczytu. Przy domyślnych 70 wiadomościach na plik to kilkaset
+ * ostatnich wiadomości czatu - znacznie więcej, niż zajmuje odbiorcy otwarcie
+ * rozmowy, a przy okazji twardy limit kosztu jednego zdarzenia.
+ */
+const ACK_BATCH_LOOKBACK = 5;
+
 export class Archive {
     private readonly states = new Map<string, ChatState>();
     private readonly queues = new Map<string, Promise<unknown>>();
@@ -442,6 +452,11 @@ export class Archive {
             mediaSkipped: media.skipped,
             isDeleted: false,
             deletedAt: null,
+            // Stan doręczenia z chwili zapisu. Godzin jeszcze nie znamy:
+            // wpisze je dopiero zdarzenie message_ack - patrz src/ack.ts.
+            ack: ackOf(message),
+            deliveredAt: null,
+            readAt: null,
             isForwarded: message.isForwarded === true,
             quotedMsg: await this.quotedInfo(message),
             location: locationInfo(message),
@@ -1784,15 +1799,7 @@ export class Archive {
         msgId: string,
         detectedAt: string,
     ): Promise<boolean> {
-        const rawId = chatIdOf(message);
-        const chatId = rawId ? (this.aliases.get(rawId) ?? rawId) : null;
-        const state = chatId ? this.states.get(chatId) : null;
-
-        // Stan nie musi być jeszcze otwarty w tej sesji. Spis po stabilnym ID
-        // pozwala wskazać dokładnie jeden folder bez skanowania całego logs/.
-        const known = chatId ? (this.index.get(chatId) ?? (rawId ? this.index.get(rawId) : undefined)) : undefined;
-        const dir = state?.chatDir ??
-            (known?.safeName ? path.join(this.config.logsDir, known.safeName) : null);
+        const dir = this.chatDirOf(message);
         const dirs = dir ? [dir] : [];
         for (const dir of dirs) {
             const jsonFiles = (await listDir(dir))
@@ -1839,6 +1846,109 @@ export class Archive {
                 return true;
             }
         }
+        return false;
+    }
+
+    /**
+     * Folder czatu, do którego należy ta wiadomość, albo null.
+     *
+     * Stan nie musi być jeszcze otwarty w tej sesji. Spis po stabilnym ID
+     * pozwala wskazać dokładnie jeden folder bez skanowania całego logs/.
+     */
+    private chatDirOf(message: WaMessage | null): string | null {
+        const rawId = chatIdOf(message);
+        const chatId = rawId ? (this.aliases.get(rawId) ?? rawId) : null;
+        const state = chatId ? this.states.get(chatId) : null;
+        if (state?.chatDir) return state.chatDir;
+
+        const known = chatId
+            ? (this.index.get(chatId) ?? (rawId ? this.index.get(rawId) : undefined))
+            : undefined;
+        return known?.safeName ? path.join(this.config.logsDir, known.safeName) : null;
+    }
+
+    // ─────────────────────────────────────────────────────────────────────
+    //  Doręczenie i odczytanie własnych wiadomości
+    // ─────────────────────────────────────────────────────────────────────
+
+    /**
+     * Nowy stan doręczenia własnej wiadomości - "dostarczona", "przeczytana".
+     *
+     * Chwilę odczytu znamy tylko z własnej obserwacji: WhatsApp podaje samą
+     * zmianę stanu, bez godziny. Zapisujemy więc moment, w którym ta zmiana do
+     * nas dotarła, i tak też ją w archiwum opisujemy.
+     *
+     * Wiadomości cudzych to nie dotyczy - tam "przeczytana" znaczyłoby tylko
+     * tyle, że my ją otworzyliśmy, a to nie jest wiedza warta zapisywania.
+     */
+    async markAck(message: WaMessage | null, ack: number | null): Promise<boolean> {
+        if (!message?.fromMe || ack === null) return false;
+
+        const msgId = messageKey(message);
+        if (!msgId) return false;
+
+        const seenAt = new Date().toISOString();
+
+        for (const [chatId, state] of this.states) {
+            const pending = state.pending.find((entry) => entry.id === msgId);
+            if (!pending) continue;
+
+            let changed = false;
+            await this.enqueue(chatId, async () => {
+                if (!applyAck(pending, ack, seenAt)) return;
+                changed = true;
+                await this.saveState(state);
+                await this.db?.saveMessage(toMessageRow(pending, state.id, state.safeName));
+            });
+            return changed;
+        }
+
+        await this.db?.markAck(msgId, ack, seenAt);
+        return this.patchAckInFiles(message, msgId, ack, seenAt);
+    }
+
+    /** Nanosi stan doręczenia na wiadomość zapisaną już w plikach partii. */
+    private async patchAckInFiles(
+        message: WaMessage | null,
+        msgId: string,
+        ack: number,
+        seenAt: string,
+    ): Promise<boolean> {
+        const dir = this.chatDirOf(message);
+        if (!dir) return false;
+
+        // Od najnowszej partii, bo potwierdzenie dotyczy świeżej wiadomości -
+        // i tylko przez kilka ostatnich. Potwierdzeń jest znacznie więcej niż
+        // skasowanych wiadomości (kilka na każdą wysłaną), a przeszukiwanie
+        // całej historii czatu przy każdym z nich czytałoby setki plików tylko
+        // po to, żeby niczego nie znaleźć.
+        const jsonFiles = (await listDir(dir))
+            .filter((file) => /^messages_\d+\.json$/.test(file))
+            .sort()
+            .reverse()
+            .slice(0, ACK_BATCH_LOOKBACK);
+
+        for (const file of jsonFiles) {
+            const full = path.join(dir, file);
+            const batch = await readJson<BatchFile>(full);
+            const archived = batch?.messages?.find((entry) => entry.id === msgId);
+            if (!batch || !archived) continue;
+
+            if (!applyAck(archived, ack, seenAt)) return false;
+            await writeJsonAtomic(full, batch);
+
+            const batchNumber = Number.parseInt(/(\d+)/.exec(file)?.[1] ?? '', 10);
+            if (Number.isFinite(batchNumber)) {
+                const htmlFile = path.join(dir, batchFileName(batchNumber));
+                const html = await readText(htmlFile);
+                const patched = html === null ? null : markAckInHtml(html, msgId, archived);
+                if (patched !== null) await writeFileAtomic(htmlFile, patched);
+            }
+
+            // Bazę poprawił już markAck() - tutaj chodzi wyłącznie o pliki.
+            return true;
+        }
+
         return false;
     }
 

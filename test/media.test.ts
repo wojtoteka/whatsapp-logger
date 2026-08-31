@@ -38,6 +38,27 @@ test('pusty wynik pobierania nie zamyka sprawy - próbujemy jeszcze raz', async 
     });
 });
 
+test('zminifikowany błąd biblioteki nie przykrywa powodu ze Store', async () => {
+    await withTempDir(async (dir) => {
+        // Tak wyglądała notatka z produkcji: "nie udało się pobrać pliku: r: r".
+        // Wyjątek biblioteki padał jako ostatni i zabierał miejsce powodowi,
+        // który dawało się przeczytać po polsku.
+        const message = fakeMessage({ id: 'zdjęcie', type: 'image', hasMedia: true });
+        (message as { downloadMedia: () => Promise<unknown> }).downloadMedia = () => {
+            throw new Error('r: r');
+        };
+
+        const result = await new MediaDownloader(testConfig(dir)).download(message, target(dir));
+
+        assert.equal(result.path, null);
+        assert.equal(
+            result.skipped?.reason,
+            'nie udało się pobrać pliku: brak otwartej strony WhatsApp Web',
+        );
+        assert.ok(isRecoverableMediaFailure(result.skipped?.reason ?? ''), 'plik wraca do kolejki');
+    });
+});
+
 test('typ wyłączony w konfiguracji zostawia notatkę bez ruszania WhatsAppa', async () => {
     await withTempDir(async (dir) => {
         let calls = 0;

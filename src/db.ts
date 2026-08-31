@@ -39,6 +39,10 @@ export interface MessageRow {
     avatarPath: string | null;
     isDeleted: boolean;
     deletedAt: string | null;
+    /** Stan doręczenia własnej wiadomości - patrz src/ack.ts. */
+    ack: number | null;
+    deliveredAt: string | null;
+    readAt: string | null;
     isForwarded: boolean;
     quoted: string | null;
     location: string | null;
@@ -86,6 +90,9 @@ export const SCHEMA: readonly string[] = [
         avatar_path   VARCHAR(500) NULL,
         is_deleted    TINYINT(1)   NOT NULL DEFAULT 0,
         deleted_at    DATETIME(3)  NULL,
+        ack           TINYINT      NULL,
+        delivered_at  DATETIME(3)  NULL,
+        read_at       DATETIME(3)  NULL,
         is_forwarded  TINYINT(1)   NOT NULL DEFAULT 0,
         quoted        TEXT         NULL,
         location      TEXT         NULL,
@@ -160,6 +167,9 @@ export function toMessageRow(
         avatarPath: toArchivePath(chatFolder, message.avatar),
         isDeleted: message.isDeleted,
         deletedAt: sqlDate(message.deletedAt),
+        ack: typeof message.ack === 'number' ? message.ack : null,
+        deliveredAt: sqlDate(message.deliveredAt),
+        readAt: sqlDate(message.readAt),
         isForwarded: message.isForwarded,
         quoted: json(message.quotedMsg),
         location: json(message.location),
@@ -167,6 +177,18 @@ export function toMessageRow(
         poll: json(message.poll),
     };
 }
+
+/**
+ * Kolumny dokładane do istniejącej tabeli wiadomości, w kolejności powstawania.
+ * Instalacja założona wcześniej nie ma ich w CREATE TABLE, a panel czyta je
+ * bezwarunkowo - bez tej listy zapytania sypałyby się na starym archiwum.
+ */
+const MESSAGE_COLUMNS: ReadonlyArray<[column: string, definition: string]> = [
+    ['deleted_at', 'deleted_at DATETIME(3) NULL AFTER is_deleted'],
+    ['ack', 'ack TINYINT NULL AFTER deleted_at'],
+    ['delivered_at', 'delivered_at DATETIME(3) NULL AFTER ack'],
+    ['read_at', 'read_at DATETIME(3) NULL AFTER delivered_at'],
+];
 
 // ─────────────────────────────────────────────────────────────────────────
 //  Połączenie
@@ -212,14 +234,15 @@ export class Database {
             for (const statement of SCHEMA) await this.pool.query(statement);
 
             // CREATE TABLE nie dodaje kolumn do istniejącej instalacji.
-            // Migracja jest celowo mała i idempotentna.
-            const [deletedAtColumns] = await this.pool.query(
-                "SHOW COLUMNS FROM messages LIKE 'deleted_at'",
-            );
-            if (Array.isArray(deletedAtColumns) && deletedAtColumns.length === 0) {
-                await this.pool.query(
-                    'ALTER TABLE messages ADD COLUMN deleted_at DATETIME(3) NULL AFTER is_deleted',
+            // Migracja jest celowo mała i idempotentna: dokładamy tylko to,
+            // czego jeszcze nie ma, i nigdy niczego nie przebudowujemy.
+            for (const [column, definition] of MESSAGE_COLUMNS) {
+                const [found] = await this.pool.query(
+                    `SHOW COLUMNS FROM messages LIKE '${column}'`,
                 );
+                if (Array.isArray(found) && found.length === 0) {
+                    await this.pool.query(`ALTER TABLE messages ADD COLUMN ${definition}`);
+                }
             }
 
             this.ready = true;
@@ -265,8 +288,9 @@ export class Database {
         const result = await this.run(
             `INSERT INTO messages
                 (id, chat_id, ts, sender, from_me, type, body, media_path, media_name,
-                 media_skipped, avatar_path, is_deleted, deleted_at, is_forwarded, quoted, location, contacts, poll)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 media_skipped, avatar_path, is_deleted, deleted_at, ack, delivered_at, read_at,
+                 is_forwarded, quoted, location, contacts, poll)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON DUPLICATE KEY UPDATE
                 body = VALUES(body),
                 media_path = VALUES(media_path),
@@ -275,6 +299,9 @@ export class Database {
                 avatar_path = VALUES(avatar_path),
                 is_deleted = VALUES(is_deleted),
                 deleted_at = VALUES(deleted_at),
+                ack = GREATEST(COALESCE(ack, VALUES(ack)), COALESCE(VALUES(ack), ack)),
+                delivered_at = COALESCE(delivered_at, VALUES(delivered_at)),
+                read_at = COALESCE(read_at, VALUES(read_at)),
                 quoted = VALUES(quoted)`,
             [
                 row.id,
@@ -290,6 +317,9 @@ export class Database {
                 row.avatarPath,
                 row.isDeleted,
                 row.deletedAt,
+                row.ack,
+                row.deliveredAt,
+                row.readAt,
                 row.isForwarded,
                 row.quoted,
                 row.location,
@@ -319,6 +349,24 @@ export class Database {
         await this.run(
             'UPDATE messages SET is_deleted = 1, deleted_at = COALESCE(deleted_at, ?) WHERE id = ?',
             [sqlDate(detectedAt), messageId],
+        );
+    }
+
+    /**
+     * Podnosi stan doręczenia wiadomości, jeśli baza ją zna.
+     *
+     * GREATEST pilnuje, żeby stan nigdy się nie cofnął, a COALESCE - żeby raz
+     * zapisana godzina odczytu została tą pierwszą, a nie ostatnią widzianą.
+     */
+    async markAck(messageId: string, ack: number, seenAt: string): Promise<void> {
+        const at = sqlDate(seenAt);
+        await this.run(
+            `UPDATE messages
+                SET ack = GREATEST(COALESCE(ack, ?), ?),
+                    delivered_at = CASE WHEN ? >= 2 THEN COALESCE(delivered_at, ?) ELSE delivered_at END,
+                    read_at = CASE WHEN ? >= 3 THEN COALESCE(read_at, ?) ELSE read_at END
+              WHERE id = ?`,
+            [ack, ack, ack, at, ack, at, messageId],
         );
     }
 

@@ -12,6 +12,7 @@ import path from 'node:path';
 import { Client, LocalAuth } from 'whatsapp-web.js';
 import type { Config } from './config';
 import { describeError, log } from './log';
+import { ensurePageAccess, PAGE_HELPER } from './pageStore';
 import type { WaClient } from './types';
 import type { WaMessage } from './types';
 import { sleep } from './util';
@@ -578,17 +579,26 @@ export async function readChatMessagesFromStore(
     if (!page || typeof page.evaluate !== 'function') return null;
 
     const count = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 50_000;
+    await ensurePageAccess(client);
 
     let models: unknown;
     try {
         models = await page.evaluate(
-            (id: string, wanted: number): unknown => {
+            (id: string, wanted: number, helperName: string): unknown => {
                 /* eslint-disable @typescript-eslint/no-explicit-any */
                 const root = globalThis as any;
                 const win = root.window ?? root;
-                if (!win.WWebJS?.getMessageModel) return null;
+                const helper = win[helperName];
 
-                let collection = win.Store?.Msg;
+                // WWebJS znika razem ze Store przy przeładowaniu strony;
+                // pomocnik składa model wiadomości również bez niego.
+                const toModel = (message: any): any =>
+                    helper?.messageModel
+                        ? helper.messageModel(message)
+                        : win.WWebJS?.getMessageModel?.(message);
+                if (!helper?.messageModel && !win.WWebJS?.getMessageModel) return null;
+
+                let collection = helper?.store?.()?.Msg ?? win.Store?.Msg;
                 if (!collection?.getModelsArray && typeof win.require === 'function') {
                     try {
                         collection = win.require('WAWebCollections')?.Msg;
@@ -615,11 +625,12 @@ export async function readChatMessagesFromStore(
 
                 msgs.sort((a: any, b: any) => Number(a?.t ?? 0) - Number(b?.t ?? 0));
                 if (msgs.length > wanted) msgs = msgs.slice(msgs.length - wanted);
-                return msgs.map((message: any) => win.WWebJS.getMessageModel(message));
+                return msgs.map(toModel).filter(Boolean);
                 /* eslint-enable @typescript-eslint/no-explicit-any */
             },
             chatId,
             count,
+            PAGE_HELPER,
         );
     } catch (err) {
         log.quiet(err, { stage: 'odczyt wiadomości z kolekcji', chat: chatId });
@@ -641,15 +652,25 @@ export async function listStatusMessages(client: WaClient): Promise<WaMessage[] 
     const page = client.pupPage;
     if (!page || typeof page.evaluate !== 'function') return null;
 
+    await ensurePageAccess(client);
+
     let models: unknown;
     try {
-        models = await page.evaluate((): unknown => {
+        models = await page.evaluate((helperName: string): unknown => {
             /* eslint-disable @typescript-eslint/no-explicit-any */
             const root = globalThis as any;
             const win = root.window ?? root;
-            if (!win.WWebJS?.getMessageModel) return null;
+            const helper = win[helperName];
 
-            let collection = win.Store?.Status;
+            // Przegląd relacji milkł na całą dobę, gdy strona się przeładowała:
+            // WWebJS przepadał razem ze Store i wyglądało to jak "brak relacji".
+            const toModel = (message: any): any =>
+                helper?.messageModel
+                    ? helper.messageModel(message)
+                    : win.WWebJS?.getMessageModel?.(message);
+            if (!helper?.messageModel && !win.WWebJS?.getMessageModel) return null;
+
+            let collection = helper?.store?.()?.Status ?? win.Store?.Status;
             if (!collection?.getModelsArray && typeof win.require === 'function') {
                 try {
                     collection = win.require('WAWebCollections')?.Status;
@@ -665,7 +686,8 @@ export async function listStatusMessages(client: WaClient): Promise<WaMessage[] 
                     const msgs = status?.msgs?.getModelsArray?.() ?? [];
                     for (const message of msgs) {
                         if (!message || message.isNotification) continue;
-                        result.push(win.WWebJS.getMessageModel(message));
+                        const model = toModel(message);
+                        if (model) result.push(model);
                     }
                 } catch {
                     // Jedna wadliwa relacja nie może zabrać pozostałych.
@@ -673,7 +695,7 @@ export async function listStatusMessages(client: WaClient): Promise<WaMessage[] 
             }
             return result;
             /* eslint-enable @typescript-eslint/no-explicit-any */
-        });
+        }, PAGE_HELPER);
     } catch (err) {
         log.quiet(err, { stage: 'surowy odczyt relacji' });
         return null;
@@ -702,14 +724,17 @@ export async function readChatSubject(client: WaClient, chatId: string): Promise
     const page = client.pupPage;
     if (!page || typeof page.evaluate !== 'function') return null;
 
+    await ensurePageAccess(client);
+
     let name: unknown;
     try {
-        name = await page.evaluate((id: string): string | null => {
+        name = await page.evaluate((id: string, helperName: string): string | null => {
             /* eslint-disable @typescript-eslint/no-explicit-any */
             const root = globalThis as any;
             const win = root.window ?? root;
-            const store = win.Store;
-            if (!store) return null;
+            const helper = win[helperName];
+            const store = helper?.store?.() ?? win.Store;
+            if (!store?.Chat) return null;
 
             const text = (value: unknown): string | null => {
                 const clean = typeof value === 'string' ? value.trim() : '';
@@ -783,7 +808,7 @@ export async function readChatSubject(client: WaClient, chatId: string): Promise
 
             return null;
             /* eslint-enable @typescript-eslint/no-explicit-any */
-        }, chatId);
+        }, chatId, PAGE_HELPER);
     } catch (err) {
         log.quiet(err, { stage: 'nazwa czatu ze Store', chat: chatId });
         return null;
@@ -806,14 +831,19 @@ export async function readProfilePicUrl(client: WaClient, chatId: string): Promi
     const page = client.pupPage;
     if (!page || typeof page.evaluate !== 'function') return null;
 
+    await ensurePageAccess(client);
+
     let url: unknown;
     try {
-        url = await page.evaluate(async (id: string): Promise<string | null> => {
+        url = await page.evaluate(async (id: string, helperName: string): Promise<string | null> => {
             /* eslint-disable @typescript-eslint/no-explicit-any */
             const root = globalThis as any;
             const win = root.window ?? root;
-            const store = win.Store;
-            if (!store) return null;
+            const helper = win[helperName];
+            // Bez pomocnika przeładowanie strony kończyło zdjęcia profilowe
+            // cichym null-em: kolekcji nie było, a powodu nikt nie widział.
+            const store = helper?.store?.() ?? win.Store;
+            if (!store?.ProfilePicThumb) return null;
 
             const address = (thumb: any): string | null => {
                 for (const key of ['eurl', 'imgFull', 'img']) {
@@ -871,7 +901,7 @@ export async function readProfilePicUrl(client: WaClient, chatId: string): Promi
 
             return null;
             /* eslint-enable @typescript-eslint/no-explicit-any */
-        }, chatId);
+        }, chatId, PAGE_HELPER);
     } catch (err) {
         log.quiet(err, { stage: 'zdjęcie profilowe ze Store', chat: chatId });
         return null;

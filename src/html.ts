@@ -6,6 +6,7 @@
 // imienia. Plik jest samowystarczalny - żadnych zewnętrznych arkuszy ani
 // bibliotek, więc archiwum czyta się także bez internetu.
 
+import { isDelivered, isRead } from './ack';
 import type { ArchivedMessage } from './types';
 import { formatBytes } from './util';
 
@@ -18,6 +19,13 @@ export const NEXT_LINK_MARKER = { open: '<!--nav-next-->', close: '<!--/nav-next
 // może zostać skasowana długo po zapisaniu pliku, więc kotwica musi być
 // w każdym bąbelku z góry.
 const DELETED_SLOT = { open: '<!--del-->', close: '<!--/del-->' } as const;
+
+/**
+ * Kotwica na znacznik doręczenia. W odróżnieniu od notki o skasowaniu jej
+ * treść wymieniamy wielokrotnie: wiadomość najpierw dochodzi, a przeczytana
+ * bywa dopiero następnego dnia.
+ */
+const ACK_SLOT = { open: '<!--ack-->', close: '<!--/ack-->' } as const;
 
 // ─────────────────────────────────────────────────────────────────────
 //  Tekst
@@ -130,6 +138,18 @@ function isoDate(ts: number): string {
     return new Date(ts * 1000).toISOString();
 }
 
+/** Sama godzina z zapisu ISO. Pusty napis, gdy zapis jest nie do odczytania. */
+function formatIsoTime(iso: string): string {
+    const value = Date.parse(iso);
+    return Number.isFinite(value) ? formatTime(value / 1000) : '';
+}
+
+/** Data z godziną z zapisu ISO - do podpowiedzi pod kursorem. */
+function formatIsoStamp(iso: string): string {
+    const value = Date.parse(iso);
+    return Number.isFinite(value) ? formatTimestamp(value / 1000) : '';
+}
+
 // ─────────────────────────────────────────────────────────────────────
 //  Ikony (zestaw wbudowany w plik, bez zewnętrznych bibliotek)
 // ─────────────────────────────────────────────────────────────────────
@@ -146,6 +166,8 @@ const ICON_SPRITE = `
     <symbol id="i-trash" viewBox="0 0 20 20"><path d="M3.8 5.6h12.4M8 5.6V3.4h4v2.2M5.6 5.6 6.5 17h7l.9-11.4"/></symbol>
     <symbol id="i-forward" viewBox="0 0 20 20"><path d="M3 16c0-5.2 3.8-7.8 9.5-7.8M9 4.4l4.4 3.8L9 12"/></symbol>
     <symbol id="i-close" viewBox="0 0 20 20"><path d="M5 5l10 10M15 5 5 15"/></symbol>
+    <symbol id="i-tick" viewBox="0 0 20 20"><path d="M2.5 10.6 6 14l7-8.6"/></symbol>
+    <symbol id="i-ticks" viewBox="0 0 20 20"><path d="M1.5 10.6 4.6 13.7l6.4-7.9M8.2 10.9l2.3 2.3 6.7-8.2"/></symbol>
   </defs>
 </svg>`;
 
@@ -304,6 +326,38 @@ function deletedNote(): string {
     return `<p class="gone">${icon('trash')}Skasowana w WhatsAppie. Treść została w archiwum.</p>`;
 }
 
+/**
+ * Znacznik doręczenia przy własnej wiadomości - to samo, co dwa "ptaszki"
+ * w WhatsAppie, tyle że z godziną.
+ *
+ * Godzina bierze się z chwili, w której logger zobaczył zmianę stanu, więc
+ * pojawia się tylko przy wiadomościach odczytanych w czasie jego pracy.
+ * Odczytana bez godziny to stan poznany po fakcie i tak też jest opisana -
+ * patrz src/ack.ts.
+ */
+export function renderAck(msg: ArchivedMessage): string {
+    if (!msg.fromMe) return '';
+
+    const read = isRead(msg.ack);
+    const delivered = isDelivered(msg.ack);
+    if (!delivered && !read) return '';
+
+    const when = read ? msg.readAt : msg.deliveredAt;
+    const stamp = when ? formatIsoTime(when) : null;
+    const full = when ? formatIsoStamp(when) : null;
+
+    const label = read ? 'Przeczytana' : 'Dostarczona';
+    const title = full
+        ? `${label}: ${full}`
+        : `${label} - WhatsApp nie podał godziny, bo stan poznaliśmy dopiero po fakcie`;
+
+    return (
+        `<span class="ack${read ? ' read' : ''}" title="${esc(title)}">` +
+        `${icon(read ? 'ticks' : 'tick')}<span class="ack-text">${esc(label)}` +
+        `${stamp ? ` ${stamp}` : ''}</span></span>`
+    );
+}
+
 /** Pojedynczy wpis w zapisie rozmowy. */
 function renderMessage(msg: ArchivedMessage): string {
     const own = msg.fromMe;
@@ -354,7 +408,7 @@ function renderMessage(msg: ArchivedMessage): string {
         <div class="bubble">
             ${parts}
             ${deleted}
-            <p class="stamp"><time class="mono" datetime="${isoDate(msg.timestamp)}">${formatTime(msg.timestamp)}</time></p>
+            <p class="stamp"><time class="mono" datetime="${isoDate(msg.timestamp)}">${formatTime(msg.timestamp)}</time>${own ? `${ACK_SLOT.open}${renderAck(msg)}${ACK_SLOT.close}` : ''}</p>
         </div>
     </article>`;
 }
@@ -422,6 +476,33 @@ export function markDeletedInHtml(html: string, messageId: string): string | nul
         }
     }
     return patched;
+}
+
+/**
+ * Wymienia znacznik doręczenia w zapisanym już pliku.
+ *
+ * Zwraca null, gdy tej wiadomości w pliku nie ma albo gdy w kotwicy stoi
+ * dokładnie to samo - wołający nie ma wtedy po co zapisywać pliku od nowa.
+ */
+export function markAckInHtml(html: string, messageId: string, msg: ArchivedMessage): string | null {
+    const anchor = `data-id="${esc(messageId)}"`;
+    const start = html.indexOf(anchor);
+    if (start === -1) return null;
+
+    const slotStart = html.indexOf(ACK_SLOT.open, start);
+    const slotEnd = html.indexOf(ACK_SLOT.close, slotStart);
+    if (slotStart === -1 || slotEnd === -1) return null;
+
+    // Kotwica musi należeć do tej wiadomości, a nie do następnej. Plik sprzed
+    // tej wersji programu w ogóle jej nie ma i wtedy trafilibyśmy w cudzą.
+    const nextMessage = html.indexOf('<article class="msg ', start);
+    if (nextMessage !== -1 && nextMessage < slotStart) return null;
+
+    const current = html.slice(slotStart + ACK_SLOT.open.length, slotEnd);
+    const fresh = renderAck(msg);
+    if (current === fresh) return null;
+
+    return html.slice(0, slotStart + ACK_SLOT.open.length) + fresh + html.slice(slotEnd);
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -649,9 +730,21 @@ a:hover{color:#68D9CB}
 .text{line-height:1.5}
 .link{text-underline-offset:2px}
 
-.stamp{text-align:right;margin-top:3px}
+.stamp{
+    text-align:right;margin-top:3px;
+    display:flex;align-items:center;justify-content:flex-end;gap:6px;
+}
 .stamp time{font-size:11px;color:var(--dim);letter-spacing:.02em}
 .msg.own .stamp time{color:rgba(228,237,238,.62)}
+
+/* Potwierdzenie doręczenia - dwa ptaszki jak w WhatsAppie, z godziną. */
+.ack{
+    display:inline-flex;align-items:center;gap:3px;
+    font-size:11px;color:rgba(228,237,238,.62);
+    letter-spacing:.02em;white-space:nowrap;cursor:help;
+}
+.ack .icon{width:14px;height:14px;stroke-width:2.1}
+.ack.read{color:#7fd4ff}
 
 /* ── Separator dnia ── */
 .day{display:flex;justify-content:center;margin:22px 0 14px}
@@ -799,6 +892,7 @@ a:hover{color:#68D9CB}
     .msg.own .bubble{background:#e6f0ee!important}
     .who,.quote-who{color:#222!important}
     .stamp time,.colophon,.skipped,.poll-note{color:#555!important}
+    .ack,.ack.read{color:#555!important}
     .pager,.lightbox,.lb-close,.zoom{display:none!important}
     .media img{max-width:60mm}
     .msg{page-break-inside:avoid}

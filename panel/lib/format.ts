@@ -29,6 +29,20 @@ export function isoDate(ts: number): string {
     return new Date(ts * 1000).toISOString();
 }
 
+/** Sama godzina z zapisu ISO. Null, gdy zapisu nie da się odczytać. */
+export function isoTime(iso: string | null | undefined): string | null {
+    if (!iso) return null;
+    const value = Date.parse(iso);
+    return Number.isFinite(value) ? formatTime(value / 1000) : null;
+}
+
+/** Data z godziną z zapisu ISO. Null, gdy zapisu nie da się odczytać. */
+export function isoDateTime(iso: string | null | undefined): string | null {
+    if (!iso) return null;
+    const value = Date.parse(iso);
+    return Number.isFinite(value) ? formatDateTime(value / 1000) : null;
+}
+
 /** "wczoraj", "3 dni temu" - to, co czyta się na liście czatów. */
 export function relativeDay(ts: number | null): string {
     if (!ts) return 'brak wiadomości';

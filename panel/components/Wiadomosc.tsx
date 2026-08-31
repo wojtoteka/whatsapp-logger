@@ -1,5 +1,15 @@
 import { fileUrl, toArchivePath } from '@/lib/archiwum';
-import { formatBytes, formatDateTime, formatTime, isoDate, mediaKind, senderTone, typeName } from '@/lib/format';
+import {
+    formatBytes,
+    formatDateTime,
+    formatTime,
+    isoDate,
+    isoDateTime,
+    isoTime,
+    mediaKind,
+    senderTone,
+    typeName,
+} from '@/lib/format';
 import type { ArchivedMessage } from '@/lib/typy';
 import { Awatar } from './Awatar';
 import { MaterialIcon } from './MaterialIcon';
@@ -66,9 +76,49 @@ export function Wiadomosc({ message, folder }: Props) {
 
                 <p className="stamp">
                     <time dateTime={isoDate(message.timestamp)}>{formatTime(message.timestamp)}</time>
+                    <Doreczenie message={message} />
                 </p>
             </div>
         </article>
+    );
+}
+
+/**
+ * Znacznik doręczenia - to samo, co dwa "ptaszki" w WhatsAppie, tyle że
+ * z godziną odczytu.
+ *
+ * Godzina bierze się z chwili, w której logger zobaczył zmianę stanu, bo
+ * WhatsApp podaje samą zmianę, bez znacznika czasu. Dlatego wiadomość bywa
+ * przeczytana, a godziny przy niej nie ma: stan poznaliśmy po fakcie i nie
+ * mamy prawa twierdzić, kiedy dokładnie się to stało.
+ */
+function Doreczenie({ message }: { message: ArchivedMessage }) {
+    if (!message.fromMe || typeof message.ack !== 'number') return null;
+
+    const read = message.ack >= 3;
+    const delivered = message.ack >= 2;
+    if (!delivered) return null;
+
+    const when = read ? message.readAt : message.deliveredAt;
+    const label = read ? 'Przeczytana' : 'Dostarczona';
+    const stamp = isoTime(when);
+    const full = isoDateTime(when);
+
+    return (
+        <span
+            className={`ack ${read ? 'read' : ''}`.trim()}
+            title={
+                full
+                    ? `${label}: ${full}`
+                    : `${label} - WhatsApp nie podał godziny, bo stan poznaliśmy dopiero po fakcie`
+            }
+        >
+            <MaterialIcon name={read ? 'doneAll' : 'done'} />
+            <span>
+                {label}
+                {stamp ? ` ${stamp}` : ''}
+            </span>
+        </span>
     );
 }
 

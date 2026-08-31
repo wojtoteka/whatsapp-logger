@@ -7,6 +7,8 @@ const FILES = {
     forward: 'forward.svg',
     arrowBack: 'arrow_back.svg',
     arrowForward: 'arrow_forward.svg',
+    done: 'done.svg',
+    doneAll: 'done_all.svg',
 } as const;
 
 export type MaterialIconName = keyof typeof FILES;

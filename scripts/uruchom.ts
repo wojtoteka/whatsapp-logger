@@ -36,6 +36,9 @@ const NEXT_BIN = path.join(PANEL_DIR, 'node_modules', 'next', 'dist', 'bin', 'ne
 /** Ile najdłużej czekamy, aż logger dopisze oczekujące wiadomości. */
 const SHUTDOWN_TIMEOUT_MS = 20_000;
 
+/** Pod tą nazwą logger dostaje PID launchera - patrz startLogger(). */
+const PARENT_PID_ENV = 'WA_LOGGER_PARENT_PID';
+
 // npm 11 na Windowsie zamienia argumenty "--nazwa" w npm_config_nazwa
 // zamiast przekazać je procesowi. Składamy z powrotem znane flagi, zachowując
 // też zwykłe argumenty, np. login po --uzytkownik.
@@ -100,6 +103,10 @@ function startLogger(): void {
     const child = spawn(process.execPath, [path.join(ROOT_DIR, 'dist', 'index.js'), ...loggerArgs], {
         cwd: ROOT_DIR,
         stdio: 'inherit',
+        // Logger pilnuje, czy ten proces jeszcze żyje. Bez tego zabity twardo
+        // launcher zostawiał za sobą działającego loggera z otwartym Chromium,
+        // do końca dnia, aż ktoś go ręcznie znalazł i ubił.
+        env: { ...process.env, [PARENT_PID_ENV]: String(process.pid) },
     });
     track('logger', child);
 }
@@ -323,10 +330,23 @@ function waitForLogger(code: number, deadline: number): void {
     setTimeout(() => waitForLogger(code, deadline), 250).unref();
 }
 
-for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+// SIGHUP jest tu równie ważny jak Ctrl+C. Dostajemy go, gdy znika terminal -
+// czyli przy każdym zamknięciu połączenia SSH. Bez tej obsługi launcher ginął
+// na miejscu, nie zdążywszy zatrzymać dzieci: logger, panel i Chromium
+// zostawały jako sieroty pod PID 1, mielące procesor aż do ręcznego zabicia.
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
     process.on(signal, () => {
         stopAll(0);
     });
 }
+
+// Ostatnia siatka: cokolwiek by nas nie zakończyło - błąd, process.exit() -
+// dzieci mają odejść razem z nami. kill() jest wywołaniem systemowym, więc
+// wolno go użyć nawet tutaj, gdzie nic asynchronicznego już się nie wykona.
+process.on('exit', () => {
+    for (const { child } of children) {
+        if (child.exitCode === null && !child.killed) child.kill();
+    }
+});
 
 main();

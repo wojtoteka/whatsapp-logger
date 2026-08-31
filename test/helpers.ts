@@ -132,6 +132,8 @@ export interface FakeMessageOptions {
     notifyName?: string;
     isStatus?: boolean;
     hasMedia?: boolean;
+    /** Stan doręczenia, tak jak podaje go WhatsApp: 2 dostarczona, 3 odczytana. */
+    ack?: number;
     contact?: FakeContact | null;
     /** Nazwa czatu zwracana przez getChat. Brak = getChat rzuca błędem. */
     chatName?: string | null;
@@ -161,6 +163,7 @@ export function fakeMessage(options: FakeMessageOptions = {}): WaMessage {
         body: options.body ?? '',
         type: options.type ?? 'chat',
         hasMedia: options.hasMedia ?? false,
+        ack: options.ack,
         hasQuotedMsg: false,
         isForwarded: false,
         isStatus: options.isStatus ?? false,

@@ -9,6 +9,7 @@ import fs from 'node:fs/promises';
 import type { Config } from './config';
 import { messageHash, messageKey } from './identity';
 import { log } from './log';
+import { ensurePageAccess, PAGE_HELPER, pageAccessLine } from './pageStore';
 import type { DownloadedMedia, SkippedMedia, WaMessage } from './types';
 import { ensureDir, sleep } from './util';
 
@@ -252,35 +253,57 @@ export class MediaDownloader {
         options: DownloadOptions = {},
     ): Promise<FetchOutcome> {
         let firstError: unknown = null;
-        // Powód z ostatniego podejścia jest najbliższy prawdy: wcześniejsze
+
+        // Dwa powody, osobno, i to nie jest ozdobnik.
+        //
+        // Odczyt ze Store nazywa przyczynę po polsku ("media wygasły i czekają,
+        // aż telefon wyśle je ponownie"). Biblioteka rzuca tym, co wyleci
+        // z zminifikowanego kodu WhatsApp Weba - w archiwum lądowało z tego
+        // "nie udało się pobrać pliku: r: r". Kiedy oba podejścia zawiodą,
+        // do notatki idzie ten pierwszy; treść wyjątku biblioteki zostaje
+        // wyłącznie na wypadek, gdyby Store nie powiedział nic.
+        //
+        // Z każdej drogi bierzemy powód z ostatniego podejścia: wcześniejsze
         // mogły jeszcze mówić "pobieranie trwa", a to stan przejściowy.
-        let why: string | null = null;
+        let storeWhy: string | null = null;
+        let libraryWhy: string | null = null;
 
         const tryOnce = async (
             load: () => Promise<DownloadedMedia | null>,
+            onError: (reason: string) => void,
         ): Promise<DownloadedMedia | null> => {
             try {
                 const media = await load();
                 return media?.data ? media : null;
             } catch (err) {
                 firstError ??= err;
-                why = describeShort(err);
+                onError(describeShort(err));
                 return null;
             }
         };
 
         const viaLibrary = (): Promise<DownloadedMedia | null> =>
-            tryOnce(async () => (await message.downloadMedia()) as DownloadedMedia | null);
+            tryOnce(
+                async () => (await message.downloadMedia()) as DownloadedMedia | null,
+                (reason) => {
+                    libraryWhy = reason;
+                },
+            );
         const viaStore = async (): Promise<DownloadedMedia | null> =>
-            tryOnce(async () => {
-                const result = await downloadMediaFromStore(message, {
-                    ...(options.waitForStageMs === undefined
-                        ? {}
-                        : { waitForStageMs: options.waitForStageMs }),
-                });
-                if (result.why) why = result.why;
-                return result.media;
-            });
+            tryOnce(
+                async () => {
+                    const result = await downloadMediaFromStore(message, {
+                        ...(options.waitForStageMs === undefined
+                            ? {}
+                            : { waitForStageMs: options.waitForStageMs }),
+                    });
+                    if (result.why) storeWhy = result.why;
+                    return result.media;
+                },
+                (reason) => {
+                    storeWhy = reason;
+                },
+            );
 
         // Relacji biblioteka szuka wyłącznie w Store.Msg, gdzie po przeglądzie
         // zwykle ich już nie ma - dla nich zaczynamy od odczytu wprost
@@ -290,22 +313,21 @@ export class MediaDownloader {
 
         const waits = this.retriesLeft(target) > 0 ? RETRY_WAITS_MS : RETRY_WAITS_MS.slice(0, 1);
 
-        for (const [attempt, waitMs] of waits.entries()) {
+        // Bez message.reload() w tej pętli - i to nie jest oszczędność, tylko
+        // naprawa. reload() przepuszcza model przez getMessageModel(), czyli
+        // przez serialize(), a to w tym wydaniu WhatsApp Weba jest dokładnie
+        // ta droga, która kończy się zminifikowanym "r: r" (ten sam błąd, dla
+        // którego lista czatów i historia są czytane wprost ze Store). Wracało
+        // stamtąd nie tylko puste odświeżenie: błąd serializacji przykrywał
+        // prawdziwy powód niepobrania pliku, bo padał jako ostatni. W notatce
+        // zostawało zagadkowe "r: r" zamiast tego, co naprawdę się stało.
+        // Odczyt wprost z kolekcji robi to samo, tylko bez serializacji.
+        for (const waitMs of waits) {
             if (waitMs > 0) await sleep(waitMs);
 
             for (const attemptDownload of order) {
                 const media = await attemptDownload();
                 if (media) return { media, why: null };
-            }
-
-            // Odświeżenie modelu kosztuje osobne zapytanie do strony, więc
-            // sięgamy po nie dopiero, gdy zwykłe pobranie zawiodło raz.
-            if (attempt > 0 && typeof message.reload === 'function') {
-                const fresh = await tryOnce(async () => {
-                    const reloaded = (await message.reload()) as WaMessage | null;
-                    return reloaded ? ((await reloaded.downloadMedia()) as DownloadedMedia | null) : null;
-                });
-                if (fresh) return { media: fresh, why: null };
             }
         }
 
@@ -319,7 +341,7 @@ export class MediaDownloader {
                 messageType: message.type,
             });
         }
-        return { media: null, why };
+        return { media: null, why: storeWhy ?? libraryWhy };
     }
 
     /**
@@ -393,6 +415,12 @@ export function buildFileName(message: WaMessage, media: DownloadedMedia): strin
  *  - prosi telefon o ponowne wysłanie wygasłego pliku ("REUPLOADING")
  *    i czeka na wynik tej prośby;
  *  - nazywa powód niepowodzenia, zamiast oddawać samo "nie ma".
+ *
+ * Cała praca w przeglądarce jest osłonięta: modele WhatsApp Weba mają pola
+ * liczone getterami, które potrafią rzucić zminifikowanym "r: r" przy samym
+ * odczycie. Jeden taki wyjątek wychodził dotąd z page.evaluate() i wracał do
+ * Node jako "powód" niepobrania pliku, przykrywając prawdziwą przyczynę.
+ * Stąd `safe()` przy każdym dotknięciu modelu i próba awaryjna na końcu.
  */
 export async function downloadMediaFromStore(
     message: WaMessage,
@@ -411,241 +439,311 @@ export async function downloadMediaFromStore(
     const page = message.client?.pupPage;
     if (!page) return { media: null, stage: null, why: 'brak otwartej strony WhatsApp Web' };
 
+    // Kolekcje WhatsApp Weba potrafią zniknąć razem z przeładowaną stroną.
+    // Zanim uznamy plik za stracony, dajemy im wrócić - patrz src/pageStore.ts.
+    const access = await ensurePageAccess(message.client, { waitForPage: true });
+    if (!access.ready) {
+        return { media: null, stage: null, why: pageAccessLine(access) };
+    }
+
     const waitMs = options.waitForStageMs ?? STAGE_WAIT_MS;
 
-    return page.evaluate(async (wantedIds: string[], stageWaitMs: number): Promise<StoreDownload> => {
-        /* eslint-disable @typescript-eslint/no-explicit-any */
-        const win = globalThis as any;
-        const Store = win.Store;
-        const fail = (why: string, stage: string | null = null): StoreDownload => ({
-            media: null,
-            stage,
-            why,
-        });
+    try {
+        return await page.evaluate(
+            async (
+                wantedIds: string[],
+                stageWaitMs: number,
+                helperName: string,
+            ): Promise<StoreDownload> => {
+                /* eslint-disable @typescript-eslint/no-explicit-any */
+                const win = globalThis as any;
+                const fail = (why: string, stage: string | null = null): StoreDownload => ({
+                    media: null,
+                    stage,
+                    why,
+                });
 
-        if (!Store) return fail('przeglądarka nie ma jeszcze Store WhatsAppa');
+                /** Odczyt z modelu, który nie ma prawa przewrócić całej strony. */
+                const safe = <T>(read: () => T, fallback: T): T => {
+                    try {
+                        return read();
+                    } catch {
+                        return fallback;
+                    }
+                };
 
-        // Model w przeglądarce ma poprawny MsgKey, więc porównujemy go
-        // ze wszystkim, czym dysponujemy po stronie Node.
-        const matches = (value: any): boolean => {
-            const id = value?.id;
-            if (!id) return false;
-            const forms = [id._serialized, id.id, typeof id.toString === 'function' ? id.toString() : null];
-            return forms.some((form) => typeof form === 'string' && wantedIds.includes(form));
-        };
+                // Pomocnik składa kolekcje z window.require, gdy window.Store
+                // zniknął po przeładowaniu strony. Samo window.Store zostaje
+                // drogą awaryjną - na wypadek, gdyby pomocnika nie było.
+                const helper = safe(() => win[helperName], null);
+                const Store = safe(() => helper?.store?.(), null) ?? safe(() => win.Store, null);
+                if (!Store?.Msg) return fail('przeglądarka nie ma jeszcze Store WhatsAppa');
 
-        const modelsOf = (value: any): any[] => {
-            if (!value) return [];
-            if (Array.isArray(value)) return value;
-            try {
-                if (typeof value.getModelsArray === 'function') return value.getModelsArray();
-            } catch {
-                /* następny kształt */
-            }
-            if (Array.isArray(value.models)) return value.models;
-            if (Array.isArray(value._models)) return value._models;
-            return [];
-        };
+                // Model w przeglądarce ma poprawny MsgKey, więc porównujemy go
+                // ze wszystkim, czym dysponujemy po stronie Node.
+                const matches = (value: any): boolean =>
+                    safe(() => {
+                        const id = value?.id;
+                        if (!id) return false;
+                        const forms = [
+                            id._serialized,
+                            id.id,
+                            typeof id.toString === 'function' ? id.toString() : null,
+                        ];
+                        return forms.some(
+                            (form) => typeof form === 'string' && wantedIds.includes(form),
+                        );
+                    }, false);
 
-        let msg: any = null;
-        for (const wantedId of wantedIds) {
-            try {
-                msg = Store.Msg?.get?.(wantedId) ?? null;
-            } catch {
-                /* relacji zwykle tu nie ma */
-            }
-            if (msg) break;
-        }
+                const modelsOf = (value: any): any[] =>
+                    safe(() => {
+                        if (!value) return [];
+                        if (Array.isArray(value)) return value;
+                        if (typeof value.getModelsArray === 'function') return value.getModelsArray();
+                        if (Array.isArray(value.models)) return value.models;
+                        if (Array.isArray(value._models)) return value._models;
+                        return [];
+                    }, []);
 
-        if (!msg) {
-            let statuses: any[] = [];
-            try {
-                statuses = Store.Status?.getModelsArray?.() ?? [];
-            } catch {
-                statuses = [];
-            }
-
-            for (const status of statuses) {
-                // Nazwy prywatnych pól zmieniają się między wydaniami WhatsAppa.
-                // Najpierw znane warianty, potem pozostałe pola z "msg" w nazwie.
-                const sources: any[] = [status?.msgs, status?._msgs, status?.msgCollection, status?._msgCollection];
-                for (const [key, value] of Object.entries(status ?? {})) {
-                    if (/msg/i.test(key)) sources.push(value);
-                }
-                for (const source of sources) {
-                    msg = modelsOf(source).find((candidate) => matches(candidate)) ?? null;
+                let msg: any = null;
+                for (const wantedId of wantedIds) {
+                    msg = safe(() => Store.Msg?.get?.(wantedId) ?? null, null);
                     if (msg) break;
                 }
-                if (msg) break;
-            }
-        }
 
-        // Wiadomość nadrobiona po przerwie bywa poza pamięcią przeglądarki.
-        // Ta sama droga, którą biblioteka dociąga pojedyncze wiadomości.
-        if (!msg) {
-            for (const wantedId of wantedIds) {
-                try {
-                    const found = await Store.Msg?.getMessagesById?.([wantedId]);
-                    msg = found?.messages?.[0] ?? null;
-                } catch {
-                    /* następny identyfikator */
-                }
-                if (msg) break;
-            }
-        }
-
-        if (!msg) return fail('wiadomości nie ma już w pamięci przeglądarki');
-
-        const wait = (ms: number): Promise<void> =>
-            new Promise((resolve) => setTimeout(resolve, ms));
-        const stageNow = (): string => String(msg?.mediaData?.mediaStage ?? '');
-
-        // "REUPLOADING" znaczy, że plik wygasł na serwerze i telefon musi go
-        // wysłać jeszcze raz. Biblioteka poddaje się w tym miejscu; my o to
-        // wysłanie prosimy (rmrReason: 1) i czekamy na jego skutek.
-        let requestError: string | null = null;
-        if (stageNow() !== 'RESOLVED' && typeof msg.downloadMedia === 'function') {
-            try {
-                await msg.downloadMedia({ downloadEvenIfExpensive: true, rmrReason: 1 });
-            } catch (err: any) {
-                // O tym, czy coś z tego wyszło, decyduje etap poniżej, ale
-                // treść błędu bywa jedyną informacją o odciętym połączeniu.
-                requestError = String(err?.message ?? err ?? '').slice(0, 200) || null;
-            }
-        }
-
-        // Pobieranie trwa poza tym wywołaniem, więc czekamy na jego koniec.
-        const deadline = Date.now() + stageWaitMs;
-        while (
-            Date.now() < deadline &&
-            (stageNow() === 'FETCHING' || stageNow() === 'REUPLOADING')
-        ) {
-            await wait(400);
-        }
-
-        const found = (data: unknown): DownloadedMedia | null =>
-            typeof data === 'string' && data.length > 0
-                ? {
-                      data,
-                      mimetype: msg.mimetype,
-                      filename: msg.filename,
-                      filesize: msg.size,
-                  }
-                : null;
-
-        /**
-         * Rozszyfrowany plik, który przeglądarka trzyma po udanym pobraniu -
-         * dokładnie ten, którym sama rysuje zdjęcie w oknie rozmowy.
-         *
-         * Bierzemy go przed DownloadManagerem, bo nie wymaga ani sieci, ani
-         * kompletu metadanych (directPath, mediaKey, encFilehash). Wygasłe
-         * i dosłane po ponownym wysłaniu media potrafią części z nich nie
-         * mieć - i właśnie na tym kończyło się notatką "nie udało się
-         * pobrać pliku", mimo że zdjęcie było widoczne w WhatsAppie.
-         */
-        const blobOf = (holder: any): unknown => {
-            if (!holder) return null;
-            if (typeof win.Blob === 'function' && holder instanceof win.Blob) return holder;
-            for (const key of ['_blob', 'forceableBlob', 'blob']) {
-                const value = holder[key];
-                if (value) return value;
-            }
-            for (const key of ['forceToBlob', 'toBlob']) {
-                if (typeof holder[key] === 'function') {
-                    try {
-                        return holder[key]();
-                    } catch {
-                        /* następna droga */
+                // Relacje leżą w osobnej kolekcji. Czytamy z niej wyłącznie
+                // znane pola: przejście po Object.entries() dotykało wszystkich
+                // własnych pól modelu, a każde z nich może być getterem, który
+                // rzuca - i tak jeden wadliwy status zabierał całą próbę.
+                if (!msg) {
+                    for (const status of modelsOf(safe(() => Store.Status, null))) {
+                        for (const key of ['msgs', '_msgs', 'msgCollection', '_msgCollection']) {
+                            const source = safe(() => status?.[key], null);
+                            msg = modelsOf(source).find((candidate) => matches(candidate)) ?? null;
+                            if (msg) break;
+                        }
+                        if (msg) break;
                     }
                 }
-            }
-            return null;
-        };
 
-        const blob = await Promise.resolve(blobOf(msg.mediaData?.mediaBlob)).catch(() => null);
-        if (blob) {
-            const fromBlob = await new Promise<string | null>((resolve) => {
-                try {
-                    // FileReader jest globalną przeglądarki, a ten kod
-                    // kompiluje się w typach Node - stąd droga przez win.
-                    const reader = new win.FileReader();
-                    reader.onloadend = (): void => {
-                        const value = reader.result;
-                        resolve(typeof value === 'string' ? (value.split(',')[1] ?? null) : null);
-                    };
-                    reader.onerror = (): void => resolve(null);
-                    reader.readAsDataURL(blob);
-                } catch {
-                    resolve(null);
+                // Wiadomość nadrobiona po przerwie bywa poza pamięcią przeglądarki.
+                // Ta sama droga, którą biblioteka dociąga pojedyncze wiadomości.
+                if (!msg) {
+                    for (const wantedId of wantedIds) {
+                        try {
+                            const found = await Store.Msg?.getMessagesById?.([wantedId]);
+                            msg = found?.messages?.[0] ?? null;
+                        } catch {
+                            /* następny identyfikator */
+                        }
+                        if (msg) break;
+                    }
                 }
-            });
-            const media = found(fromBlob);
-            if (media) return { media, stage: stageNow(), why: null };
-        }
 
-        // Od tego miejsca każde wyjście jest porażką i ma nazwać powód.
-        // Wcześniej wszystkie zlewały się w jedno "nie udało się pobrać".
-        const stage = stageNow();
-        if (stage === 'REUPLOADING') {
-            return fail('media wygasły i czekają, aż telefon wyśle je ponownie', stage);
-        }
-        if (stage === 'FETCHING') {
-            return fail(`pobieranie nie skończyło się w ${Math.round(stageWaitMs / 1000)} s`, stage);
-        }
-        if (stage.includes('ERROR')) {
-            return fail(`WhatsApp zgłosił błąd pobierania (${stage})`, stage);
-        }
-        if (typeof Store.DownloadManager?.downloadAndMaybeDecrypt !== 'function') {
-            return fail('przeglądarka nie udostępnia DownloadManagera', stage);
-        }
-        if (!msg.directPath || !msg.mediaKey) {
-            // Bez tych dwóch pól nie ma czego odszyfrować, a przeglądarka nie
-            // ma gotowego blobu - plik przepadł po stronie WhatsAppa.
-            return fail(
-                'WhatsApp nie ma już adresu ani klucza do tego pliku' +
-                    (requestError ? ` (${requestError})` : ''),
-                stage,
-            );
-        }
+                if (!msg) return fail('wiadomości nie ma już w pamięci przeglądarki');
 
-        let decrypted: unknown;
-        try {
-            decrypted = await Store.DownloadManager.downloadAndMaybeDecrypt({
-                directPath: msg.directPath,
-                encFilehash: msg.encFilehash,
-                filehash: msg.filehash,
-                mediaKey: msg.mediaKey,
-                mediaKeyTimestamp: msg.mediaKeyTimestamp,
-                type: msg.type,
-                signal: new AbortController().signal,
-                downloadQpl: {
-                    addAnnotations() {
-                        return this;
-                    },
-                    addPoint() {
-                        return this;
-                    },
-                },
-            });
-        } catch (err: any) {
-            // Tu wychodzi najczęstsza przyczyna po stronie serwera: odcięty
-            // dostęp do mmg.whatsapp.net albo 404 na wygasłym directPath.
-            const status = err?.status ?? err?.statusCode;
-            const detail = String(err?.message ?? err ?? 'bez treści').slice(0, 200);
-            return fail(
-                status
-                    ? `serwer mediów WhatsAppa odpowiedział ${String(status)}`
-                    : `pobieranie z serwera mediów nie doszło do skutku: ${detail}`,
-                stage,
-            );
-        }
+                const wait = (ms: number): Promise<void> =>
+                    new Promise((resolve) => setTimeout(resolve, ms));
+                const stageNow = (): string => safe(() => String(msg?.mediaData?.mediaStage ?? ''), '');
 
-        const media = found(await win.WWebJS.arrayBufferToBase64Async(decrypted));
-        return media
-            ? { media, stage, why: null }
-            : fail('serwer mediów oddał pustą odpowiedź', stage);
-        /* eslint-enable @typescript-eslint/no-explicit-any */
-    }, wanted, waitMs);
+                // "REUPLOADING" znaczy, że plik wygasł na serwerze i telefon musi
+                // go wysłać jeszcze raz. Biblioteka poddaje się w tym miejscu; my
+                // o to wysłanie prosimy (rmrReason: 1) i czekamy na jego skutek.
+                //
+                // Przy "FETCHING" tej prośby nie ponawiamy: pobieranie już trwa,
+                // bo ruszyło je wywołanie biblioteki chwilę wcześniej. Drugie
+                // downloadMedia() na tym samym modelu wchodziło mu w drogę.
+                let requestError: string | null = null;
+                const before = stageNow();
+                if (
+                    before !== 'RESOLVED' &&
+                    before !== 'FETCHING' &&
+                    safe(() => typeof msg.downloadMedia === 'function', false)
+                ) {
+                    try {
+                        await msg.downloadMedia({ downloadEvenIfExpensive: true, rmrReason: 1 });
+                    } catch (err: any) {
+                        // O tym, czy coś z tego wyszło, decyduje etap poniżej, ale
+                        // treść błędu bywa jedyną informacją o odciętym połączeniu.
+                        requestError = safe(
+                            () => String(err?.message ?? err ?? '').slice(0, 200) || null,
+                            null,
+                        );
+                    }
+                }
+
+                // Pobieranie trwa poza tym wywołaniem, więc czekamy na jego koniec.
+                const deadline = Date.now() + stageWaitMs;
+                while (
+                    Date.now() < deadline &&
+                    (stageNow() === 'FETCHING' || stageNow() === 'REUPLOADING')
+                ) {
+                    await wait(400);
+                }
+
+                const found = (data: unknown): DownloadedMedia | null =>
+                    typeof data === 'string' && data.length > 0
+                        ? {
+                              data,
+                              mimetype: safe(() => msg.mimetype, undefined),
+                              filename: safe(() => msg.filename, undefined),
+                              filesize: safe(() => msg.size, undefined),
+                          }
+                        : null;
+
+                /**
+                 * Rozszyfrowany plik, który przeglądarka trzyma po udanym pobraniu -
+                 * dokładnie ten, którym sama rysuje zdjęcie w oknie rozmowy.
+                 *
+                 * Bierzemy go przed DownloadManagerem, bo nie wymaga ani sieci, ani
+                 * kompletu metadanych (directPath, mediaKey, encFilehash). Wygasłe
+                 * i dosłane po ponownym wysłaniu media potrafią części z nich nie
+                 * mieć - i właśnie na tym kończyło się notatką "nie udało się
+                 * pobrać pliku", mimo że zdjęcie było widoczne w WhatsAppie.
+                 */
+                const blobOf = (holder: any): unknown => {
+                    if (!holder) return null;
+                    if (safe(() => typeof win.Blob === 'function' && holder instanceof win.Blob, false)) {
+                        return holder;
+                    }
+                    for (const key of ['_blob', 'forceableBlob', 'blob']) {
+                        const value = safe(() => holder[key], null);
+                        if (value) return value;
+                    }
+                    for (const key of ['forceToBlob', 'toBlob']) {
+                        const value = safe(
+                            () => (typeof holder[key] === 'function' ? holder[key]() : null),
+                            null,
+                        );
+                        if (value) return value;
+                    }
+                    return null;
+                };
+
+                const blob = await Promise.resolve(
+                    blobOf(safe(() => msg.mediaData?.mediaBlob, null)),
+                ).catch(() => null);
+                if (blob) {
+                    const fromBlob = await new Promise<string | null>((resolve) => {
+                        try {
+                            // FileReader jest globalną przeglądarki, a ten kod
+                            // kompiluje się w typach Node - stąd droga przez win.
+                            const reader = new win.FileReader();
+                            reader.onloadend = (): void => {
+                                const value = reader.result;
+                                resolve(
+                                    typeof value === 'string' ? (value.split(',')[1] ?? null) : null,
+                                );
+                            };
+                            reader.onerror = (): void => resolve(null);
+                            reader.readAsDataURL(blob);
+                        } catch {
+                            resolve(null);
+                        }
+                    });
+                    const media = found(fromBlob);
+                    if (media) return { media, stage: stageNow(), why: null };
+                }
+
+                // Od tego miejsca każde wyjście jest porażką i ma nazwać powód.
+                // Wcześniej wszystkie zlewały się w jedno "nie udało się pobrać".
+                const stage = stageNow();
+                if (stage === 'REUPLOADING') {
+                    return fail('media wygasły i czekają, aż telefon wyśle je ponownie', stage);
+                }
+                if (stage === 'FETCHING') {
+                    return fail(
+                        `pobieranie nie skończyło się w ${Math.round(stageWaitMs / 1000)} s`,
+                        stage,
+                    );
+                }
+                if (stage.includes('ERROR')) {
+                    return fail(`WhatsApp zgłosił błąd pobierania (${stage})`, stage);
+                }
+
+                const download = safe(() => Store.DownloadManager?.downloadAndMaybeDecrypt, null);
+                if (typeof download !== 'function') {
+                    return fail('przeglądarka nie udostępnia DownloadManagera', stage);
+                }
+
+                const directPath = safe(() => msg.directPath, null);
+                const mediaKey = safe(() => msg.mediaKey, null);
+                if (!directPath || !mediaKey) {
+                    // Bez tych dwóch pól nie ma czego odszyfrować, a przeglądarka
+                    // nie ma gotowego blobu - plik przepadł po stronie WhatsAppa.
+                    return fail(
+                        'WhatsApp nie ma już adresu ani klucza do tego pliku' +
+                            (requestError ? ` (${requestError})` : ''),
+                        stage,
+                    );
+                }
+
+                let decrypted: unknown;
+                try {
+                    decrypted = await download({
+                        directPath,
+                        encFilehash: safe(() => msg.encFilehash, undefined),
+                        filehash: safe(() => msg.filehash, undefined),
+                        mediaKey,
+                        mediaKeyTimestamp: safe(() => msg.mediaKeyTimestamp, undefined),
+                        type: safe(() => msg.type, undefined),
+                        signal: new AbortController().signal,
+                        downloadQpl: {
+                            addAnnotations() {
+                                return this;
+                            },
+                            addPoint() {
+                                return this;
+                            },
+                        },
+                    });
+                } catch (err: any) {
+                    // Tu wychodzi najczęstsza przyczyna po stronie serwera: odcięty
+                    // dostęp do mmg.whatsapp.net albo 404 na wygasłym directPath.
+                    const status = safe(() => err?.status ?? err?.statusCode, null);
+                    const detail = safe(
+                        () => String(err?.message ?? err ?? 'bez treści').slice(0, 200),
+                        'bez treści',
+                    );
+                    return fail(
+                        status
+                            ? `serwer mediów WhatsAppa odpowiedział ${String(status)}`
+                            : `pobieranie z serwera mediów nie doszło do skutku: ${detail}`,
+                        stage,
+                    );
+                }
+
+                let base64: unknown;
+                try {
+                    // Przez pomocnika, bo WWebJS znika razem ze Store, a wtedy
+                    // rozszyfrowany plik przepadał tuż przed metą.
+                    base64 = helper?.toBase64
+                        ? await helper.toBase64(decrypted)
+                        : await win.WWebJS.arrayBufferToBase64Async(decrypted);
+                } catch (err: any) {
+                    const detail = safe(
+                        () => String(err?.message ?? err ?? 'bez treści').slice(0, 200),
+                        'bez treści',
+                    );
+                    return fail(`nie udało się przepisać pliku na base64: ${detail}`, stage);
+                }
+
+                const media = found(base64);
+                return media
+                    ? { media, stage, why: null }
+                    : fail('serwer mediów oddał pustą odpowiedź', stage);
+                /* eslint-enable @typescript-eslint/no-explicit-any */
+            },
+            wanted,
+            waitMs,
+            PAGE_HELPER,
+        );
+    } catch (err) {
+        // Strona mogła się przeładować w trakcie albo puppeteer stracił z nią
+        // kontakt. To jest błąd przeglądarki, a nie odpowiedź WhatsAppa - i ma
+        // być tak nazwany, żeby nie udawał powodu niepobrania pliku.
+        return { media: null, stage: null, why: `błąd w przeglądarce: ${describeShort(err)}` };
+    }
 }
 
 function describeShort(err: unknown): string {

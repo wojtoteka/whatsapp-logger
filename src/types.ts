@@ -80,6 +80,23 @@ export interface ArchivedMessage {
     isDeleted: boolean;
     /** Kiedy logger dowiedział się o usunięciu. Brak w starszych archiwach. */
     deletedAt?: string | null;
+    /**
+     * Najwyższy stan doręczenia zgłoszony przez WhatsAppa dla własnej
+     * wiadomości: -1 błąd, 0 w drodze, 1 na serwerze, 2 na telefonie odbiorcy,
+     * 3 przeczytana, 4 odsłuchana. Brak w starszych archiwach.
+     */
+    ack?: number | null;
+    /** Kiedy logger zobaczył doręczenie na telefon odbiorcy. */
+    deliveredAt?: string | null;
+    /**
+     * Kiedy logger zobaczył odczytanie wiadomości przez odbiorcę.
+     *
+     * To czas obserwacji, nie czas z telefonu odbiorcy - WhatsApp podaje samą
+     * zmianę stanu, bez znacznika. Przy programie działającym bez przerwy
+     * różnica idzie w sekundy; po dłuższym postoju wiadomość bywa już
+     * przeczytana w chwili pierwszego kontaktu i wtedy zostaje sam ack.
+     */
+    readAt?: string | null;
     isForwarded: boolean;
     quotedMsg: QuotedInfo | null;
     location: LocationInfo | null;

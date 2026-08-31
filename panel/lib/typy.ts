@@ -51,6 +51,20 @@ export interface ArchivedMessage {
     isDeleted: boolean;
     /** Pole opcjonalne dla zgodności ze starszymi archiwami. */
     deletedAt?: string | null;
+    /**
+     * Stan doręczenia własnej wiadomości: 1 na serwerze, 2 na telefonie
+     * odbiorcy, 3 przeczytana, 4 odsłuchana. Pole opcjonalne - starsze
+     * archiwum go nie ma.
+     */
+    ack?: number | null;
+    /** Kiedy logger zobaczył doręczenie na telefon odbiorcy. */
+    deliveredAt?: string | null;
+    /**
+     * Kiedy logger zobaczył odczytanie. Bywa puste przy wiadomości
+     * przeczytanej - WhatsApp nie podaje godziny, więc znamy ją tylko wtedy,
+     * gdy logger pracował w chwili odczytu.
+     */
+    readAt?: string | null;
     isForwarded: boolean;
     quotedMsg: QuotedInfo | null;
     location: LocationInfo | null;

@@ -546,7 +546,10 @@ a:hover {
     white-space: pre-wrap;
 }
 .stamp {
-    text-align: right;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 6px;
     margin-top: 3px;
     font-size: 11px;
     color: var(--dim);
@@ -554,6 +557,21 @@ a:hover {
 }
 .msg.own .stamp {
     color: rgba(228, 237, 238, 0.62);
+}
+
+/* Potwierdzenie doręczenia - dwa "ptaszki" jak w WhatsAppie, z godziną. */
+.ack {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    white-space: nowrap;
+    cursor: help;
+}
+.ack .material-icon {
+    font-size: 14px;
+}
+.ack.read {
+    color: #7fd4ff;
 }
 
 .flag {

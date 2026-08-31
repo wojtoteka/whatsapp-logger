@@ -1,7 +1,8 @@
 // WhatsApp Logger - punkt startowy.
 //
-//   npm start              zbuduj i uruchom
-//   npm start -- --sprawdz pokaż wczytane ustawienia i zakończ
+//   npm start                     zbuduj i uruchom
+//   npm start -- --sprawdz        pokaż wczytane ustawienia i zakończ
+//   npm start -- --sprawdz-media  sprawdź, dlaczego nie idą pliki, i zakończ
 //
 // Przy pierwszym uruchomieniu w terminalu pojawi się kod QR. Zeskanuj go
 // w telefonie: WhatsApp → Urządzenia połączone → Połącz urządzenie.
@@ -11,6 +12,7 @@ import qrcode from 'qrcode-terminal';
 import { Archive } from './src/archive';
 import type { BackfillStats } from './src/archive';
 import { checkArchive } from './src/archiveCheck';
+import { checkMedia } from './src/mediaCheck';
 import { loadConfig } from './src/config';
 import { Database } from './src/db';
 import { manageUsers } from './src/uzytkownicy';
@@ -28,6 +30,12 @@ import { createClient, healthLine, waitForContacts } from './src/waClient';
 
 /** Katalog programu - ścieżki z .env liczą się względem niego. */
 const ROOT_DIR = path.resolve(__dirname, '..');
+
+/** Pod tą nazwą launcher przekazuje swój PID - patrz scripts/uruchom.ts. */
+const PARENT_PID_ENV = 'WA_LOGGER_PARENT_PID';
+
+/** Jak często sprawdzamy, czy launcher jeszcze żyje. */
+const PARENT_CHECK_MS = 10_000;
 
 async function main(): Promise<void> {
     const { config, warnings, envFileFound } = loadConfig(ROOT_DIR);
@@ -62,6 +70,13 @@ async function main(): Promise<void> {
 
     if (process.argv.includes('--sprawdz') || process.argv.includes('--check')) {
         printConfig(config, envFileFound);
+        return;
+    }
+
+    // Diagnoza pobierania plików. Wymaga żywej sesji, więc stoi osobno od
+    // --sprawdz-archiwum, które czyta same pliki na dysku.
+    if (process.argv.includes('--sprawdz-media')) {
+        await runMediaCheck(config);
         return;
     }
 
@@ -114,6 +129,55 @@ async function main(): Promise<void> {
 }
 
 /**
+ * Diagnoza pobierania plików na żywej sesji WhatsApp Web.
+ *
+ * Notatka w archiwum mówi o jednym pliku. To polecenie odpowiada na pytanie,
+ * którego z niej nie widać: czy WhatsApp nie chce oddać tego konkretnego
+ * pliku, czy serwer w ogóle nie dosięga serwera plików. Pliki idą z innego
+ * hosta niż sama strona, więc działający panel i wchodzące wiadomości niczego
+ * o mediach nie dowodzą.
+ */
+async function runMediaCheck(config: Config): Promise<void> {
+    const client = createClient(config, ROOT_DIR);
+
+    client.on('qr', () => {
+        log.error('Ta sesja nie jest sparowana. Uruchom najpierw logger i zeskanuj kod QR.');
+    });
+
+    const ready = new Promise<void>((resolve, reject) => {
+        client.on('ready', () => resolve());
+        client.on('auth_failure', (message) => reject(new Error(String(message))));
+    });
+
+    log.info('Łączę z WhatsApp Web...');
+    try {
+        await client.initialize();
+        await ready;
+
+        log.info('Sprawdzam drogę pobierania plików - to potrwa do minuty.');
+        const result = await checkMedia(client, config.logsDir);
+
+        log.blank();
+        log.info(`Sieć: ${result.siec}`);
+        log.info(`Wnętrze WhatsApp Weba: ${result.wnetrze}`);
+        log.info(`W kolejce ponowień: ${String(result.wKolejce)}.`);
+
+        for (const probe of result.probki) {
+            log.blank();
+            log.info(`[${probe.źródło}] ${probe.typ} - ${probe.id}`);
+            log.info(`  model:      ${probe.model}`);
+            log.info(`  biblioteka: ${probe.biblioteka}`);
+            log.info(`  store:      ${probe.store}`);
+        }
+
+        if (result.uwagi.length > 0) log.blank();
+        for (const uwaga of result.uwagi) log.warn(uwaga);
+    } finally {
+        await client.destroy().catch(() => undefined);
+    }
+}
+
+/**
  * Wszystko, co żyje przez cały czas działania programu: zdarzenia klienta,
  * timery przeglądów i porządne zamknięcie.
  */
@@ -125,6 +189,8 @@ class Runtime {
     private incrementalFailures = 0;
     private incrementalRetryAt = 0;
     private readyFallbackTimer: NodeJS.Timeout | null = null;
+    /** Zegar pilnujący, czy launcher jeszcze żyje - patrz watchParent(). */
+    private parentWatchTimer: NodeJS.Timeout | null = null;
     private readyStarted = false;
     /** Porządki po LOGOUT, na które musi zaczekać ponowne zdarzenie ready. */
     private relinkPreparation: Promise<void> | null = null;
@@ -529,6 +595,15 @@ class Runtime {
         this.client.on('message_revoke_me', (message) => {
             void this.archive.markDeleted(message as WaMessage);
         });
+
+        // Doręczenie i odczytanie własnych wiadomości. WhatsApp podaje samą
+        // zmianę stanu, bez godziny - dlatego liczy się chwila, w której to
+        // zdarzenie do nas dotarło, i tylko wtedy, gdy program pracuje.
+        this.client.on('message_ack', (message, ack) => {
+            void this.archive.markAck(message as WaMessage, Number(ack)).catch((error: unknown) => {
+                log.quiet(error, { stage: 'potwierdzenie odczytu' });
+            });
+        });
     }
 
     private async handleIncoming(message: WaMessage): Promise<void> {
@@ -648,6 +723,12 @@ class Runtime {
         };
         process.on('SIGINT', () => stop('SIGINT'));
         process.on('SIGTERM', () => stop('SIGTERM'));
+        // SIGHUP przychodzi, gdy znika terminal - czyli przy każdym zamknięciu
+        // połączenia SSH. Bez tej obsługi Node kończył proces na miejscu,
+        // zostawiając niedopisane wiadomości i otwartego Chromium.
+        process.on('SIGHUP', () => stop('SIGHUP'));
+
+        this.watchParent();
 
         process.on('unhandledRejection', (reason) => {
             log.error('Nieobsłużony błąd w tle', reason, { stage: 'unhandledRejection' });
@@ -657,6 +738,30 @@ class Runtime {
             log.error('Nieoczekiwany błąd', err, { stage: 'uncaughtException' });
             void this.shutdown('uncaughtException', EXIT_RESTART);
         });
+    }
+
+    /**
+     * Pilnuje, czy launcher jeszcze żyje.
+     *
+     * Sygnały załatwiają zwykłe zamykanie, ale nie każde. Launcher zabity
+     * twardo (SIGKILL, zapchana pamięć) nie zdąży już nikomu nic powiedzieć,
+     * a logger zostaje wtedy sierotą pod PID 1 - razem z Chromium, które
+     * potrafi ciągnąć procesor, dopóki ktoś ręcznie go nie znajdzie i nie ubije.
+     *
+     * Sprawdzamy konkretny PID przekazany w zmiennej środowiskowej, a nie samo
+     * "czy rodzic to init". Uruchomienie loggera wprost - z systemd albo z ręki -
+     * tej zmiennej nie ma i wtedy nic tu nie pilnujemy.
+     */
+    private watchParent(): void {
+        const expected = Number(process.env[PARENT_PID_ENV]);
+        if (!Number.isInteger(expected) || expected <= 1) return;
+
+        this.parentWatchTimer = setInterval(() => {
+            if (this.shuttingDown || process.ppid === expected) return;
+            log.warn('Program nadrzędny zniknął - zamykam się razem z nim.');
+            void this.shutdown('zniknął launcher');
+        }, PARENT_CHECK_MS);
+        this.parentWatchTimer.unref?.();
     }
 
     private async shutdown(signal: string, exitCode = 0): Promise<void> {
@@ -669,6 +774,10 @@ class Runtime {
 
         this.pauseOperationalTimers();
         this.clearReadyFallback();
+        if (this.parentWatchTimer) {
+            clearInterval(this.parentWatchTimer);
+            this.parentWatchTimer = null;
+        }
 
         try {
             await this.tau.stop();

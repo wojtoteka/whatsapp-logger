@@ -781,6 +781,82 @@ test('wiadomość skasowana po zapisaniu pliku dostaje notkę wprost w HTML', as
     });
 });
 
+test('odczytanie własnej wiadomości czekającej w partii zapisuje się w stanie', async () => {
+    await withTempDir(async (dir) => {
+        const archive = new Archive(
+            testConfig(dir, { messagesPerFile: 100 }),
+            fakeClient({ lidToPhone: { '999@lid': '5550100@c.us' } }),
+        );
+
+        const message = fakeMessage({
+            id: 'moja-1',
+            from: 'me@c.us',
+            to: '999@lid',
+            fromMe: true,
+            body: 'jesteś?',
+            ack: 1,
+        });
+        await archive.save(message);
+
+        assert.equal(await archive.markAck(message, 3), true);
+
+        const state = await readState(dir, '5550100');
+        assert.equal(state.pendingMessages[0]?.ack, 3);
+        assert.ok(state.pendingMessages[0]?.readAt, 'godzina odczytu ma trafić na dysk');
+    });
+});
+
+test('odczytanie wiadomości z zapisanego już pliku dopisuje znacznik w HTML i JSON', async () => {
+    await withTempDir(async (dir) => {
+        const archive = new Archive(
+            testConfig(dir, { messagesPerFile: 1 }),
+            fakeClient({ lidToPhone: { '999@lid': '5550100@c.us' } }),
+        );
+
+        const message = fakeMessage({
+            id: 'poszla-do-pliku',
+            from: 'me@c.us',
+            to: '999@lid',
+            fromMe: true,
+            body: 'do zobaczenia',
+            ack: 1,
+        });
+        await archive.save(message);
+
+        const file = path.join(dir, '5550100', 'messages_0001.html');
+        assert.ok(!(await fs.readFile(file, 'utf8')).includes('Przeczytana'));
+
+        assert.equal(await archive.markAck(message, 3), true);
+
+        assert.ok((await fs.readFile(file, 'utf8')).includes('Przeczytana'));
+
+        const batch = JSON.parse(
+            await fs.readFile(path.join(dir, '5550100', 'messages_0001.json'), 'utf8'),
+        ) as { messages: Array<{ ack?: number | null; readAt?: string | null }> };
+        assert.equal(batch.messages[0]?.ack, 3);
+        assert.ok(batch.messages[0]?.readAt);
+    });
+});
+
+test('odczytanie cudzej wiadomości nie jest odnotowywane', async () => {
+    await withTempDir(async (dir) => {
+        const archive = new Archive(
+            testConfig(dir, { messagesPerFile: 100 }),
+            fakeClient({ lidToPhone: { '999@lid': '5550100@c.us' } }),
+        );
+
+        // "Przeczytana" znaczyłoby tu tylko tyle, że my ją otworzyliśmy -
+        // a o tym archiwum nie ma po co opowiadać.
+        const message = fakeMessage({ id: 'cudza', from: '999@lid', body: 'cześć', ack: 3 });
+        await archive.save(message);
+
+        assert.equal(await archive.markAck(message, 3), false);
+
+        const state = await readState(dir, '5550100');
+        assert.equal(state.pendingMessages[0]?.readAt ?? null, null);
+    });
+});
+
 test('kasowanie po czasie usuwa stare oczekujące wiadomości, także z cichego czatu', async () => {
     await withTempDir(async (dir) => {
         const archive = new Archive(testConfig(dir), fakeClient());

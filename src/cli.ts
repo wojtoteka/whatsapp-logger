@@ -5,6 +5,7 @@ export const CLI_FLAGS = [
     '--sprawdz',
     '--check',
     '--sprawdz-archiwum',
+    '--sprawdz-media',
     '--nadrob-wszystko',
     '--backfill-all',
     '--uzytkownik',
