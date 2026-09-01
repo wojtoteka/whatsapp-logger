@@ -4,6 +4,8 @@
 export const EXIT_RESTART = 2;
 /** Utrata autoryzacji wymaga działania człowieka, więc pętla restartów nie pomoże. */
 export const EXIT_AUTH_FAILURE = 20;
+/** Nikt nie zeskanował kodu QR. Restart wygenerowałby tylko kolejne kody. */
+export const EXIT_QR_UNSCANNED = 21;
 
 export const RESTART_WINDOW_MS = 15 * 60 * 1000;
 export const RESTART_MAX_ATTEMPTS = 8;
@@ -24,7 +26,7 @@ export interface RestartDecision {
     delayMs: number;
     attempt: number;
     recentAttempts: number[];
-    reason: 'clean_exit' | 'auth_failure' | 'limit' | 'retry';
+    reason: 'clean_exit' | 'auth_failure' | 'qr_unscanned' | 'limit' | 'retry';
 }
 
 /**
@@ -43,6 +45,9 @@ export function decideLoggerRestart(
     }
     if (exitCode === EXIT_AUTH_FAILURE) {
         return { restart: false, delayMs: 0, attempt: 0, recentAttempts, reason: 'auth_failure' };
+    }
+    if (exitCode === EXIT_QR_UNSCANNED) {
+        return { restart: false, delayMs: 0, attempt: 0, recentAttempts, reason: 'qr_unscanned' };
     }
     if (recentAttempts.length >= RESTART_MAX_ATTEMPTS) {
         return {

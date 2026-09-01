@@ -13,6 +13,8 @@ import type { WaClient, WaMessage } from '../src/types';
 /** Konfiguracja wskazująca na świeży folder tymczasowy. */
 export function testConfig(logsDir: string, overrides: Partial<Config> = {}): Config {
     return {
+        qrMaxCodes: 3,
+
         lockedChatPassword: '',
         discordWebhookUrl: '',
         discordPingUserId: '',

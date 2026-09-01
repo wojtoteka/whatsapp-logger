@@ -8,6 +8,7 @@ import {
     clearFullHistoryScan,
     fetchMessagesRaw,
     findChrome,
+    guardInjection,
     healthLine,
     listChatsRaw,
     listContactChatIds,
@@ -608,4 +609,80 @@ test('awaria requestProfilePicFromServer nie przewraca pobierania zdjęcia', asy
     );
 
     assert.equal(result, 'https://pps.whatsapp.net/zapasowa.jpg');
+});
+
+// -------------------------------------------------------------------------
+//  Wstrzykiwanie wiązań po nawigacji strony
+// -------------------------------------------------------------------------
+
+/** Klient tylko z tym, czego dotyka guardInjection. */
+interface FakeInjectable {
+    pupPage: { exposeFunction: (name: string, fn: unknown) => Promise<void> };
+    inject: () => Promise<void>;
+}
+
+test('guardInjection: dwa wstrzyknięcia nie nachodzą na siebie', async () => {
+    let active = 0;
+    let overlap = false;
+    let calls = 0;
+    const fake: FakeInjectable = {
+        pupPage: { exposeFunction: async () => undefined },
+        async inject() {
+            calls++;
+            active++;
+            if (active > 1) overlap = true;
+            await new Promise((resolve) => setTimeout(resolve, 5));
+            active--;
+        },
+    };
+
+    guardInjection(fake as unknown as WaClient);
+    await Promise.all([fake.inject(), fake.inject(), fake.inject()]);
+
+    assert.equal(calls, 3);
+    assert.equal(overlap, false);
+});
+
+test('guardInjection: zajęta nazwa wiązania nie przerywa wstrzyknięcia', async () => {
+    const exposed = new Set<string>();
+    const finished: string[] = [];
+    const fake: FakeInjectable = {
+        pupPage: {
+            async exposeFunction(name: string) {
+                if (exposed.has(name)) {
+                    throw new Error(
+                        `Failed to add page binding with name ${name}: ` +
+                            `window['${name}'] already exists!`,
+                    );
+                }
+                exposed.add(name);
+            },
+        },
+        async inject() {
+            await this.pupPage.exposeFunction('onQRChangedEvent', () => undefined);
+            finished.push('koniec');
+        },
+    };
+
+    guardInjection(fake as unknown as WaClient);
+    await fake.inject();
+    await fake.inject();
+
+    assert.deepEqual(finished, ['koniec', 'koniec']);
+});
+
+test('guardInjection: inny błąd strony nadal wychodzi na wierzch', async () => {
+    const fake: FakeInjectable = {
+        pupPage: {
+            async exposeFunction() {
+                throw new Error('Target closed');
+            },
+        },
+        async inject() {
+            await this.pupPage.exposeFunction('onQRChangedEvent', () => undefined);
+        },
+    };
+
+    guardInjection(fake as unknown as WaClient);
+    await assert.rejects(fake.inject(), /Target closed/);
 });

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
     decideLoggerRestart,
     EXIT_AUTH_FAILURE,
+    EXIT_QR_UNSCANNED,
     RESTART_MAX_ATTEMPTS,
     RESTART_WINDOW_MS,
     shouldRelinkWithoutRestart,
@@ -37,6 +38,14 @@ test('stare awarie wypadają z okna i nie blokują późniejszego restartu', () 
 test('czyste wyjście i utrata autoryzacji nie są ponawiane', () => {
     assert.equal(decideLoggerRestart(0, []).reason, 'clean_exit');
     assert.equal(decideLoggerRestart(EXIT_AUTH_FAILURE, []).reason, 'auth_failure');
+});
+
+test('brak zeskanowanego kodu QR nie jest ponawiany', () => {
+    const decision = decideLoggerRestart(EXIT_QR_UNSCANNED, []);
+
+    assert.equal(decision.reason, 'qr_unscanned');
+    assert.equal(decision.restart, false);
+    assert.equal(decision.delayMs, 0);
 });
 
 test('tylko LOGOUT przechodzi do nowego QR bez restartowania przeglądarki', () => {

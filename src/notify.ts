@@ -13,7 +13,7 @@ import { log } from './log';
 const COOLDOWN_MS = 5 * 60 * 1000;
 const TIMEOUT_MS = 10000;
 
-export type AlertCategory = 'auth_failure' | 'disconnected' | 'qr' | 'ready';
+export type AlertCategory = 'auth_failure' | 'disconnected' | 'qr' | 'qr_unscanned' | 'ready';
 
 /**
  * Odstępy między powiadomieniami, osobne dla każdej kategorii, zapisane
@@ -108,6 +108,20 @@ export class Notifier {
             color: 0xeab308,
             ping: true,
             category: 'qr',
+        });
+    }
+
+    /** Kody QR poszły w powietrze, nikt ich nie zeskanował - logger się wyłącza. */
+    async qrUnscanned(codes: number): Promise<void> {
+        await this.send({
+            title: '🔴 WhatsApp Logger - brak sparowania',
+            description:
+                `Nikt nie zeskanował kodu QR (pokazane kody: ${String(codes)}).\n\n` +
+                'Logger zatrzymał się sam, żeby nie generować kolejnych kodów w kółko. ' +
+                'Uruchom go ponownie, gdy będziesz mógł zeskanować kod.',
+            color: 0xdc2626,
+            ping: true,
+            category: 'qr_unscanned',
         });
     }
 

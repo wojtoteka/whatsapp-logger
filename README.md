@@ -78,7 +78,7 @@ Skrypt nie tworzy bazy ani konta panelu - ten krok jest opisany niżej.
    npm start
    ```
 
-Przy pierwszym uruchomieniu terminal pokaże kod QR. Zeskanuj go w telefonie przez **WhatsApp → Urządzenia połączone → Połącz urządzenie**. Dane sparowanej sesji zostaną w lokalnym folderze `.wwebjs_auth`, więc przy kolejnych startach kod zwykle nie będzie potrzebny.
+Przy pierwszym uruchomieniu terminal pokaże kod QR. Zeskanuj go w telefonie przez **WhatsApp → Urządzenia połączone → Połącz urządzenie**. Dane sparowanej sesji zostaną w lokalnym folderze `.wwebjs_auth`, więc przy kolejnych startach kod zwykle nie będzie potrzebny. Niezeskanowany kod odświeża się sam co kilkadziesiąt sekund, więc po trzech kodach (`QR_MAX_CODES`) logger wychodzi zamiast zapełniać terminal - wystarczy uruchomić go ponownie z telefonem w ręku.
 
 Program zatrzymasz skrótem `Ctrl+C`. Przed zakończeniem logger próbuje bezpiecznie dopisać wiadomości oczekujące w pamięci.
 
@@ -300,7 +300,7 @@ Osierocony proces nie tylko zostaje w pamięci. Node z zamkniętym terminalem po
 
 ```bash
 # jednorazowo
-tmux new -s logger        # albo: systemd, patrz niżej
+tmux new -s logger        # albo: pm2 lub systemd, patrz niżej
 npm start
 # odłączenie: Ctrl+B, potem D. Powrót: tmux attach -t logger
 ```
@@ -309,7 +309,44 @@ npm start
 
 Gdy logger straci połączenie albo zakończy się przez przejściowy błąd, launcher zapisuje stan i uruchamia go ponownie z rosnącym opóźnieniem: 5, 10, 20, 40, a następnie maksymalnie 60 sekund.
 
-W ciągu 15 minut wykonywanych jest najwyżej osiem prób. Po przekroczeniu limitu aplikacja zatrzymuje się, żeby nie wpadać w nieskończoną pętlę. Utrata autoryzacji również zatrzymuje restarty, ponieważ wymaga ponownego sparowania telefonu.
+W ciągu 15 minut wykonywanych jest najwyżej osiem prób. Po przekroczeniu limitu aplikacja zatrzymuje się, żeby nie wpadać w nieskończoną pętlę. Utrata autoryzacji również zatrzymuje restarty, ponieważ wymaga ponownego sparowania telefonu - tak samo jak wyczerpanie puli kodów QR z `QR_MAX_CODES`. Jeżeli program chodzi pod pm2 albo systemd, te dwa przypadki wymagają jeszcze jednego ustawienia po stronie nadzorcy - patrz niżej.
+
+### Kody wyjścia i nadzorcy procesów
+
+Nie każde wyjście znaczy to samo, a nadzorcy procesów domyślnie podnoszą program po dowolnym z nich. To jest pułapka: jeżeli logger wyszedł, bo nikt nie zeskanował kodu QR, ślepy restart wraca dokładnie do tego, przed czym `QR_MAX_CODES` miało chronić - kody lecą dalej, tyle że w logu nadzorcy.
+
+| Kod | Znaczenie | Restart pomoże? |
+|---:|---|---|
+| `0` | Zwykłe zatrzymanie: Ctrl+C, `SIGTERM`, `pm2 stop`. | nie |
+| `2` | Awaria przejściowa albo rozłączenie. Launcher ponawia to sam, do ośmiu prób w 15 minut. | tylko gdy padł sam launcher |
+| `20` | Utrata autoryzacji - potrzebne ponowne sparowanie telefonu. | nie |
+| `21` | Pokazano wszystkie kody QR z `QR_MAX_CODES` i żaden nie został zeskanowany. | nie |
+
+**pm2.** W repozytorium leży gotowy `ecosystem.config.js`. Cała różnica siedzi w `stop_exit_codes: [0, 20, 21]` - bez tej listy pm2 podnosi program po każdym wyjściu, łącznie z tymi, które program wykonał świadomie.
+
+```bash
+npm run build
+pm2 start ecosystem.config.js
+pm2 save && pm2 startup      # start razem z systemem
+pm2 logs whatsapp-logger     # kod QR pojawia się właśnie tutaj
+```
+
+Po wyjściu z kodem `20` lub `21` pm2 pokazuje aplikację jako `stopped` i sam jej nie rusza. Wracasz do niej ręcznie, z telefonem pod ręką: `pm2 restart whatsapp-logger`, a kod QR odczytujesz z `pm2 logs`.
+
+`stop_exit_codes` wymaga pm2 5.1 lub nowszego (`pm2 -v`). Starsze wydania pomijają tę opcję bez słowa i pętla restartów wraca - tam trzeba `autorestart: false`. Nie tracisz przez to wiele, bo ponawianie po przejściowych awariach robi i tak launcher, a nie pm2.
+
+**systemd.** Ta sama polityka to jedna linia `RestartPreventExitStatus`:
+
+```ini
+[Service]
+Type=simple
+WorkingDirectory=/home/wojciech/whatsapp_loger
+ExecStart=/usr/bin/node dist/scripts/uruchom.js
+Restart=on-failure
+RestartPreventExitStatus=20 21
+# Launcher czeka do 20 sekund, aż logger dopisze archiwum z pamięci.
+TimeoutStopSec=30
+```
 
 ## Konfiguracja `.env`
 
@@ -319,6 +356,7 @@ Pełny wzór z komentarzami znajduje się w `.env.example`. Pusta wartość ozna
 
 | Zmienna | Domyślnie | Znaczenie |
 |---|---:|---|
+| `QR_MAX_CODES` | `3` | Ile kodów QR pokazać przed samoczynnym wyjściem loggera; `0` znosi limit. |
 | `LOGS_DIR` | `./logs` | Folder archiwum. |
 | `MESSAGES_PER_FILE` | `70` | Liczba wiadomości w jednej zamkniętej partii HTML/JSON. |
 | `BACKFILL_MESSAGES_PER_CHAT` | `250` | Liczba ostatnich wiadomości sprawdzanych w istniejących archiwach; `0` wyłącza. |

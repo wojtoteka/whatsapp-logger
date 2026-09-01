@@ -14,6 +14,13 @@ export const MEDIA_TYPES_ALL = ['image', 'video', 'audio', 'ptt', 'document', 's
 export type MediaType = (typeof MEDIA_TYPES_ALL)[number];
 
 export interface Config {
+    /**
+     * Ile kodów QR pokazać, zanim logger sam się wyłączy. Niezeskanowany kod
+     * odświeża się co kilkadziesiąt sekund, więc bez limitu czekanie przez noc
+     * zostawia tysiące kodów w terminalu. 0 = bez limitu.
+     */
+    qrMaxCodes: number;
+
     /** Kod do zablokowanych czatów. Pusty = obsługa wyłączona. */
     lockedChatPassword: string;
     /** Webhook Discorda. Pusty = powiadomienia wyłączone. */
@@ -200,6 +207,7 @@ function readLogLevel(env: Env, warnings: string[]): LogLevel {
 
 /** Klucze, które program rozumie. Reszta w .env to najpewniej literówka. */
 const KNOWN_KEYS = new Set([
+    'QR_MAX_CODES',
     'LOCKED_CHAT_PASSWORD',
     'DISCORD_WEBHOOK_URL',
     'DISCORD_PING_USER_ID',
@@ -274,6 +282,8 @@ export function loadConfig(rootDir: string, env: Env = process.env): LoadResult 
     const logsDirRaw = readText(env, 'LOGS_DIR', './logs');
 
     const config: Config = {
+        qrMaxCodes: readNumber(env, 'QR_MAX_CODES', 3, warnings, { min: 0, max: 1000 }),
+
         lockedChatPassword: readText(env, 'LOCKED_CHAT_PASSWORD'),
         discordWebhookUrl: readText(env, 'DISCORD_WEBHOOK_URL'),
         discordPingUserId: readText(env, 'DISCORD_PING_USER_ID'),

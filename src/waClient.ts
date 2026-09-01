@@ -9,6 +9,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import type { Page } from 'puppeteer';
 import { Client, LocalAuth } from 'whatsapp-web.js';
 import type { Config } from './config';
 import { describeError, log } from './log';
@@ -90,7 +91,7 @@ export function createClient(config: Config, rootDir: string): WaClient {
         );
     }
 
-    return new Client({
+    const client = new Client({
         // Sesja zapisana lokalnie - kod QR skanuje się tylko raz.
         authStrategy: new LocalAuth({ dataPath: path.join(rootDir, '.wwebjs_auth') }),
         puppeteer: {
@@ -99,6 +100,78 @@ export function createClient(config: Config, rootDir: string): WaClient {
             ...(chromePath ? { executablePath: chromePath } : {}),
         },
     }) as WaClient;
+
+    guardInjection(client);
+    return client;
+}
+
+/** Strony, w których powtórzone wiązania są już przepuszczane. */
+const patchedPages = new WeakSet<Page>();
+
+/** Ta jedna metoda strony, którą podmieniamy - bez rodzajników puppeteera. */
+interface ExposingPage {
+    exposeFunction: (name: string, fn: unknown) => Promise<void>;
+}
+
+/**
+ * whatsapp-web.js wstrzykuje swoje wiązania do strony po każdej nawigacji
+ * (`framenavigated`). Wylogowanie przerzuca WhatsApp Web kilka razy pod rząd,
+ * więc dwa wstrzyknięcia potrafią ruszyć równocześnie: obydwa widzą, że
+ * window.onQRChangedEvent jeszcze nie ma, i obydwa proszą puppeteera o to samo
+ * wiązanie. Drugie dostaje "already exists", a ponieważ biblioteka niczego
+ * tam nie łapie, ten błąd wywracał cały proces tuż przed kodem QR.
+ *
+ * Ustawiamy wstrzyknięcia w kolejkę, żeby sprawdzenie wiązania i jego dodanie
+ * nie nachodziły już na siebie.
+ */
+export function guardInjection(client: WaClient): void {
+    const target = client as WaClient & { inject?: () => Promise<void> };
+    const inject = target.inject;
+    if (typeof inject !== 'function') return;
+
+    let queue: Promise<void> = Promise.resolve();
+    target.inject = () => {
+        const next = queue.then(() => {
+            allowRepeatedBindings(target.pupPage);
+            return inject.call(target);
+        });
+        // Kolejka ma tylko pilnować następstwa - błąd jednego wstrzyknięcia
+        // nie może zablokować kolejnych ani zostać bez odbiorcy dwa razy.
+        queue = next.then(
+            () => undefined,
+            () => undefined,
+        );
+        return next;
+    };
+}
+
+/**
+ * Powtórna prośba o odsłonięcie funkcji nie jest awarią: puppeteer trzyma
+ * listę wiązań u siebie i wgrywa je do każdego nowego dokumentu strony. Gdy
+ * biblioteka pyta o wiązanie, którego chwilowo nie widzi w stronie, idąc dalej
+ * kończymy wstrzyknięcie zamiast przerywać je w połowie.
+ */
+function allowRepeatedBindings(page: Page | undefined): void {
+    if (!page || typeof page.exposeFunction !== 'function') return;
+    if (patchedPages.has(page)) return;
+    patchedPages.add(page);
+
+    const target = page as unknown as ExposingPage;
+    const expose = target.exposeFunction.bind(target);
+    target.exposeFunction = async (name, fn) => {
+        try {
+            await expose(name, fn);
+        } catch (error) {
+            if (!isBindingConflict(error)) throw error;
+            log.debug(`Wiązanie ${name} było już w stronie - pomijam ponowne dodanie.`);
+        }
+    };
+}
+
+/** Czy to ten jeden błąd puppeteera o zajętej nazwie wiązania. */
+function isBindingConflict(error: unknown): boolean {
+    const text = describeError(error);
+    return text.includes('page binding') && text.includes('already exists');
 }
 
 // -------------------------------------------------------------------------

@@ -265,6 +265,8 @@ function handleLoggerExit(code: number | null): void {
     if (!decision.restart) {
         if (decision.reason === 'auth_failure') {
             console.error('[logger] utrata autoryzacji wymaga ponownego sparowania - nie restartuję.');
+        } else if (decision.reason === 'qr_unscanned') {
+            console.error('[logger] nikt nie zeskanował kodu QR - nie restartuję.');
         } else if (decision.reason === 'limit') {
             console.error('[logger] zbyt wiele awarii w 15 minut - zatrzymuję automatyczne restarty.');
         }

@@ -22,7 +22,12 @@ import { statusLine, unlock } from './src/lockedChats';
 import type { UnlockResult } from './src/lockedChats';
 import { Notifier } from './src/notify';
 import { runRetention } from './src/retention';
-import { EXIT_AUTH_FAILURE, EXIT_RESTART, shouldRelinkWithoutRestart } from './src/restart';
+import {
+    EXIT_AUTH_FAILURE,
+    EXIT_QR_UNSCANNED,
+    EXIT_RESTART,
+    shouldRelinkWithoutRestart,
+} from './src/restart';
 import { TauService } from './src/tauService';
 import type { WaClient, WaMessage } from './src/types';
 import { ensureDirSync, formatHours } from './src/util';
@@ -192,6 +197,8 @@ class Runtime {
     /** Zegar pilnujący, czy launcher jeszcze żyje - patrz watchParent(). */
     private parentWatchTimer: NodeJS.Timeout | null = null;
     private readyStarted = false;
+    /** Ile kodów QR już pokazaliśmy w tej próbie parowania. */
+    private qrCodes = 0;
     /** Porządki po LOGOUT, na które musi zaczekać ponowne zdarzenie ready. */
     private relinkPreparation: Promise<void> | null = null;
     private shuttingDown = false;
@@ -219,12 +226,18 @@ class Runtime {
 
     private wireAuth(): void {
         this.client.on('qr', (qr) => {
+            if (this.stopWhenNobodyScans()) return;
+
+            this.qrCodes++;
+            const limit = this.config.qrMaxCodes;
+            const licznik = limit > 0 ? ` (${String(this.qrCodes)}/${String(limit)})` : '';
             log.endProgress();
             log.blank();
             log.info('╔══════════════════════════════════════════╗');
             log.info('║  Zeskanuj kod QR w aplikacji WhatsApp    ║');
             log.info('║  Ustawienia > Urządzenia połączone       ║');
             log.info('╚══════════════════════════════════════════╝');
+            if (licznik) log.info(`Kod QR${licznik}`);
             qrcode.generate(qr, { small: true });
             void this.notifier.qrRequired();
         });
@@ -237,6 +250,8 @@ class Runtime {
         // zwłaszcza tuż po sparowaniu, gdy strona się przeładowuje.
         this.client.on('authenticated', () => {
             log.endProgress();
+            // Kod zeskanowany - następne parowanie zaczyna liczyć od zera.
+            this.qrCodes = 0;
             log.once('auth', '✓ Uwierzytelnienie przyjęte.', 'info');
             this.scheduleReadyFallback();
         });
@@ -263,6 +278,30 @@ class Runtime {
             this.clearReadyFallback();
             void this.onReady();
         });
+    }
+
+    /**
+     * Niezeskanowany kod QR odświeża się sam co kilkadziesiąt sekund. Logger
+     * zostawiony na noc wypisywał przez to setki kodów, a Chromium cały ten
+     * czas trzymało pamięć. Po ustalonej liczbie kodów wychodzimy kodem,
+     * którego launcher nie ponawia - sparowanie i tak wymaga człowieka.
+     */
+    private stopWhenNobodyScans(): boolean {
+        const limit = this.config.qrMaxCodes;
+        if (limit <= 0 || this.qrCodes < limit) return false;
+        if (this.shuttingDown) return true;
+
+        log.endProgress();
+        log.blank();
+        log.warn(
+            `Nikt nie zeskanował kodu QR (pokazane kody: ${String(limit)}). ` +
+                'Zatrzymuję logger, żeby nie zapełniać terminala kolejnymi.',
+        );
+        log.info('Uruchom program ponownie, gdy będziesz mógł zeskanować kod.');
+        void this.notifier.qrUnscanned(limit).finally(() => {
+            void this.shutdown('brak sparowania', EXIT_QR_UNSCANNED);
+        });
+        return true;
     }
 
     /**
@@ -499,6 +538,8 @@ class Runtime {
 
         this.readyStarted = false;
         this.locked = null;
+        // Nowe parowanie dostaje pełną pulę kodów QR.
+        this.qrCodes = 0;
         this.clearReadyFallback();
         this.pauseOperationalTimers();
         this.incrementalFailures = 0;
@@ -815,6 +856,9 @@ function printConfig(config: Config, envFileFound: boolean): void {
     log.info('');
     log.info(`  Archiwum                 ${config.logsDir}`);
     log.info(`  Wiadomości na plik       ${config.messagesPerFile}`);
+    log.info(
+        `  Kody QR przed wyjściem   ${config.qrMaxCodes > 0 ? String(config.qrMaxCodes) : 'bez limitu'}`,
+    );
     log.info(`  Nadrabianie na czat      ${config.backfillMessagesPerChat}`);
     log.info(`  Synchronizacja okresowa  ${config.syncIntervalMinutes > 0 ? `co ${config.syncIntervalMinutes} min` : 'wyłączona'}`);
     log.info(`  Pobierane media          ${[...config.mediaTypes].join(', ') || '(żadne)'}`);

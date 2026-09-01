@@ -16,9 +16,12 @@ export const TAU_INSTRUCTIONS = [
     // Odpowiedź rozpoznajemy po markerze w treści wiadomości. Załącznik nie
     // ma gdzie tego markera nieść, więc każda próba wysłania obrazka
     // zawieszała całe żądanie aż do upłynięcia czasu oczekiwania.
-    'BEZWZGLĘDNY ZAKAZ: nie tworzysz i nie wysyłasz żadnych obrazów, zdjęć, grafik, rysunków, memów, plików, audio ani wideo. W tym kanale nie masz takiej możliwości.',
-    'Nigdy nie mów, że umiesz albo możesz generować obrazy czy pliki, i nigdy nie obiecuj, że coś takiego przyślesz albo spróbujesz przysłać. Na pytanie "umiesz generować zdjęcia" odpowiadasz, że nie.',
-    'Poproszony o obraz albo plik nie wysyłasz załącznika i nie proponujesz obejść - odmawiasz jedną wiadomością tekstową zaczynającą się od markera.',
+    'BEZWZGLĘDNY ZAKAZ OBRAZÓW I PLIKÓW: nie tworzysz, nie generujesz i nie wysyłasz żadnych obrazów, zdjęć, grafik, rysunków, memów, plików, audio ani wideo. Nie umiesz tego - w tej roli nie masz takiej umiejętności.',
+    // Model odpowiadał "Tak" na pytanie o umiejętność, bo zakaz czytał jako
+    // ograniczenie samego kanału. Treść odpowiedzi musi być narzucona wprost.
+    'Na każde pytanie o tę umiejętność - "umiesz", "potrafisz", "możesz", "dasz radę", "a gdyby" - odpowiadasz krótko, że NIE umiesz generować obrazów, zdjęć ani plików. Nie odpowiadasz "tak", "tak, ale nie tutaj" ani "ogólnie tak" i nie tłumaczysz, że gdzie indziej byś potrafił.',
+    'Nigdy nie obiecujesz, że coś przyślesz albo spróbujesz przysłać, i nie proponujesz obejść tego zakazu.',
+    'Poproszony o obraz albo plik odmawiasz jedną wiadomością tekstową zaczynającą się od markera.',
     'Każda twoja odpowiedź jest zwykłym tekstem w jednej wiadomości, bez załączników.',
     'Nie pisz odpowiedzi za właściciela, chyba że aktualne pytanie jawnie prosi o propozycję wiadomości. Taka propozycja nadal jest tylko szkicem.',
     'Odpowiadaj wyłącznie na aktualne pytanie i korzystaj wyłącznie z przekazanego w tym żądaniu kontekstu.',
@@ -63,6 +66,9 @@ export function buildProviderPrompt(
             'FORMAT ODPOWIEDZI:',
             `Pierwsza linia odpowiedzi musi brzmieć dokładnie: ${marker}`,
             'Po tym znaczniku podaj odpowiedź dla właściciela. Odpowiedz w jednej wiadomości.',
+            // Zakaz powtórzony tuż przed danymi. W długiej instrukcji ostatnie
+            // zdania ważą najwięcej, a to właśnie ten punkt model gubił.
+            'Odpowiadasz wyłącznie tekstem: nie wysyłasz obrazów ani plików i nie deklarujesz, że umiesz je tworzyć.',
             '',
             'DANE BIEŻĄCEGO ŻĄDANIA W JSON:',
             JSON.stringify(payload),

@@ -22,6 +22,7 @@ test('bez pliku .env program dostaje komplet wartości domyślnych', async () =>
 
         assert.equal(envFileFound, false);
         assert.deepEqual(warnings, []);
+        assert.equal(config.qrMaxCodes, 3);
         assert.equal(config.messagesPerFile, 70);
         assert.equal(config.backfillMessagesPerChat, 250);
         assert.equal(config.retentionDays, 180);
@@ -30,6 +31,21 @@ test('bez pliku .env program dostaje komplet wartości domyślnych', async () =>
         assert.equal(config.lockedChatPassword, '');
         assert.equal(config.tauEnabled, false);
         assert.equal(config.tauProviderNumber, '18002428478');
+    });
+});
+
+test('QR_MAX_CODES daje się podnieść i wyłączyć zerem', async () => {
+    await withEnvFile('QR_MAX_CODES=10\n', async (dir) => {
+        const { config, warnings } = loadConfig(dir, { QR_MAX_CODES: '10' });
+
+        assert.equal(config.qrMaxCodes, 10);
+        assert.deepEqual(warnings, []);
+    });
+
+    await withEnvFile('QR_MAX_CODES=0\n', async (dir) => {
+        const { config } = loadConfig(dir, { QR_MAX_CODES: '0' });
+
+        assert.equal(config.qrMaxCodes, 0);
     });
 });
 
