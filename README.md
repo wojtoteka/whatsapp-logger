@@ -288,13 +288,21 @@ Kod tajny i lista zabezpieczonych czatów nie są zapisywane w archiwum.
 
 ## Zamykanie i praca po zamknięciu SSH
 
-`npm start` uruchamia dwa procesy potomne (logger i panel), a logger trzyma jeszcze Chromium. Wszystkie trzy mają odejść razem z launcherem i pilnują tego trzy niezależne mechanizmy:
+`npm start` uruchamia dwa procesy potomne (logger i panel), a logger trzyma jeszcze Chrome. Wszystkie mają odejść razem z launcherem, a pilnuje tego kilka warstw - bo żadna z nich sama nie wystarcza.
 
-- **sygnały** `SIGINT`, `SIGTERM` i `SIGHUP`. Ten ostatni przychodzi, gdy znika terminal - czyli przy każdym zamknięciu połączenia SSH. Wcześniej nie był obsługiwany: Node kończył launcher na miejscu, a dzieci zostawały jako sieroty pod PID 1;
-- **`process.on('exit')`** w launcherze - siatka na wypadek zakończenia z innego powodu niż sygnał;
-- **czujnik rodzica w loggerze**. Launcher przekazuje mu swój PID w `WA_LOGGER_PARENT_PID`; logger co 10 sekund sprawdza `process.ppid` i zamyka się razem z Chromium, gdy launcher zniknął. To ratuje sytuację, w której launcher został zabity twardo (`SIGKILL`) i nie zdążył nikomu nic powiedzieć. Uruchomiony wprost - z systemd albo z ręki - logger tej zmiennej nie ma i niczego nie pilnuje.
+Punkt wyjścia jest taki: **puppeteer uruchamia Chrome jako proces odłączony**, z własną grupą procesów i własną sesją. Nie dociera do niego ani `Ctrl+C` (ten idzie do grupy pierwszoplanowej), ani `SIGHUP` po zerwaniu SSH. Chrome ginie wyłącznie wtedy, kiedy zabije go logger - więc cała robota polega na tym, żeby logger zawsze doszedł do swojego końca.
 
-Osierocony proces nie tylko zostaje w pamięci. Node z zamkniętym terminalem potrafi kręcić pętlą zdarzeń na martwych deskryptorach i wtedy jeden rdzeń idzie pod korek - na ośmiordzeniowym serwerze widać to jako stałe „12%", na pięciordzeniowym jako „20%", przy zerowej pracy programu.
+- **sygnały** `SIGINT`, `SIGTERM` i `SIGHUP`, w launcherze i w loggerze. Ten ostatni przychodzi, gdy znika terminal - czyli przy każdym zamknięciu połączenia SSH;
+- **limit czasu na zamykanie w loggerze**: 8 sekund na etap i 15 sekund na całość. `browser.close()` potrafi nie wrócić nigdy - najczęściej wtedy, gdy strona WhatsAppa przestała odpowiadać - i wtedy proces zostawał w pamięci razem z Chrome. Po limicie logger zabija przeglądarkę (`SIGKILL` na całą jej grupę procesów) i kończy się sam. Drugi `Ctrl+C` skraca to czekanie od razu;
+- **kanał IPC między launcherem a loggerem**. Nie idzie nim ani jedna wiadomość; liczy się to, że gdy launcher zginie - choćby od `SIGKILL` - potok się zamyka, a logger dostaje `disconnect` i zamyka się razem z Chrome. Zapasowo dostaje też PID launchera w `WA_LOGGER_PARENT_PID` i co 10 sekund sprawdza, czy ten proces nadal istnieje; przydaje się przy uruchomieniu wprost, z systemd albo z ręki;
+- **`process.on('exit')`** po obu stronach: launcher dobija dzieci `SIGKILL`-em, logger zabiera ze sobą przeglądarkę;
+- **sprzątanie przy starcie**. Gdyby mimo wszystko coś zostało - choćby po ręcznym `kill -9` na loggerze - kolejne uruchomienie wyszukuje przeglądarki trzymające nasz profil sesji (`--user-data-dir`) i osierocone zabija, zanim podniesie własną. Przeglądarki pracującego loggera to nie dotyczy: ona ma żywego rodzica.
+
+Ta ostatnia warstwa ma bardzo praktyczny powód. Osierocony Chrome trzyma otwarty profil w `.wwebjs_auth`, więc następne uruchomienie nie miało się do czego podłączyć: logger się wywracał, launcher go ponawiał, a każde ponowienie zostawiało kolejną przeglądarkę. Stąd brały się procesy Chrome mnożące się po kilka naraz.
+
+Osierocony proces nie tylko zostaje w pamięci - potrafi też ciągnąć procesor. Logger, który zawisł w zamykaniu, ma nadal otwartą sesję do Chrome i widać go potem jako stałe kilkanaście do dwudziestu procent przy zerowej pracy programu.
+
+> Jeżeli szukasz tego w starszym kodzie: czujnik rodzica porównywał `process.ppid` z PID-em launchera i nie zadziałał ani razu. W Node `process.ppid` jest zwykłą wartością zapisaną raz przy starcie procesu, a nie żywym odczytem - osierocony logger do końca życia widział tam swojego dawnego rodzica.
 
 **Do pracy 24/7 nie zostawiaj `npm start` w sesji SSH.** Uruchom go bez terminala - wtedy `SIGHUP` w ogóle nie przychodzi, a zatrzymywanie jest jednym poleceniem zamiast szukania PID-ów:
 

@@ -35,7 +35,6 @@ const PUPPETEER_ARGS = [
     '--disable-dev-shm-usage',
     '--disable-accelerated-2d-canvas',
     '--no-first-run',
-    '--no-zygote',
     '--disable-gpu',
 ];
 
@@ -97,12 +96,61 @@ export function createClient(config: Config, rootDir: string): WaClient {
         puppeteer: {
             headless: config.headless,
             args: PUPPETEER_ARGS,
+            // Puppeteer domyślnie sam wpina się w SIGINT, SIGTERM i SIGHUP.
+            // Jego obsługa SIGINT robi process.exit(130) natychmiast po
+            // powrocie z naszej - czyli w środku zapisu oczekujących
+            // wiadomości. Zamykaniem zarządza wyłącznie shutdown() w index.ts,
+            // a tam nie ma miejsca na drugiego kierowcę.
+            handleSIGINT: false,
+            handleSIGTERM: false,
+            handleSIGHUP: false,
             ...(chromePath ? { executablePath: chromePath } : {}),
         },
     }) as WaClient;
 
     guardInjection(client);
     return client;
+}
+
+/**
+ * Dobija przeglądarkę bez pytania o zdanie.
+ *
+ * Puppeteer uruchamia Chrome jako proces odłączony (detached): z własną grupą
+ * procesów i własną sesją. Ani Ctrl+C, ani zerwanie SSH tam nie docierają -
+ * jedynym procesem, który może go zamknąć, jesteśmy my. Gdy zawiedzie łagodne
+ * destroy(), zostaje SIGKILL na całą grupę; bez tego Chrome zostaje pod PID 1
+ * i trzyma otwarty profil w .wwebjs_auth, przez co następne uruchomienie nie
+ * ma się do czego podłączyć.
+ *
+ * Wolno tego użyć nawet w obsłudze process.on('exit') - to samo wywołanie
+ * systemowe, bez niczego asynchronicznego.
+ */
+export function killBrowser(client: WaClient): void {
+    const proc = client.pupBrowser?.process();
+    if (!proc?.pid || proc.exitCode !== null || proc.signalCode !== null) return;
+
+    // Na Windowsie puppeteer nie odłącza przeglądarki, więc nie ma grupy do
+    // ubicia - tam zostaje sam proces, a dzieci sprząta system.
+    if (process.platform === 'win32') {
+        try {
+            proc.kill('SIGKILL');
+        } catch {
+            // Zdążył zniknąć sam - nic nie szkodzi.
+        }
+        return;
+    }
+
+    try {
+        // Minus przed PID-em to grupa procesów: razem z przeglądarką idą
+        // procesy pomocnicze (GPU, sieć, renderery).
+        process.kill(-proc.pid, 'SIGKILL');
+    } catch {
+        try {
+            proc.kill('SIGKILL');
+        } catch {
+            // Zdążył zniknąć sam - nic nie szkodzi.
+        }
+    }
 }
 
 /** Strony, w których powtórzone wiązania są już przepuszczane. */

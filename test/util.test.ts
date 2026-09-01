@@ -8,6 +8,8 @@ import {
     phoneDigits,
     readJson,
     safeFileName,
+    TIMED_OUT,
+    withTimeout,
     writeJsonAtomic,
 } from '../src/util';
 import { withTempDir } from './helpers';
@@ -136,3 +138,22 @@ async function exists(file: string): Promise<boolean> {
         return false;
     }
 }
+
+test('czekanie z limitem oddaje wynik, gdy zadanie zdąży', async () => {
+    assert.equal(await withTimeout(Promise.resolve('gotowe'), 1000), 'gotowe');
+});
+
+test('zadanie, które nie wraca, nie blokuje już czekającego', async () => {
+    // Dokładnie ten przypadek zawieszał zamykanie: browser.close() potrafi
+    // nie rozwiązać się nigdy, a proces zostawał w pamięci razem z Chrome.
+    const nigdy = new Promise<void>(() => undefined);
+
+    assert.equal(await withTimeout(nigdy, 10), TIMED_OUT);
+});
+
+test('błąd zadania nadal dociera do wywołującego', async () => {
+    await assert.rejects(
+        () => withTimeout(Promise.reject(new Error('padło')), 1000),
+        /padło/,
+    );
+});

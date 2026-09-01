@@ -21,6 +21,7 @@ import { log } from './src/log';
 import { statusLine, unlock } from './src/lockedChats';
 import type { UnlockResult } from './src/lockedChats';
 import { Notifier } from './src/notify';
+import { killOrphanBrowsers, sessionProfileDir } from './src/orphans';
 import { runRetention } from './src/retention';
 import {
     EXIT_AUTH_FAILURE,
@@ -30,8 +31,8 @@ import {
 } from './src/restart';
 import { TauService } from './src/tauService';
 import type { WaClient, WaMessage } from './src/types';
-import { ensureDirSync, formatHours } from './src/util';
-import { createClient, healthLine, waitForContacts } from './src/waClient';
+import { ensureDirSync, formatHours, processAlive, TIMED_OUT, withTimeout } from './src/util';
+import { createClient, healthLine, killBrowser, waitForContacts } from './src/waClient';
 
 /** Katalog programu - ścieżki z .env liczą się względem niego. */
 const ROOT_DIR = path.resolve(__dirname, '..');
@@ -41,6 +42,16 @@ const PARENT_PID_ENV = 'WA_LOGGER_PARENT_PID';
 
 /** Jak często sprawdzamy, czy launcher jeszcze żyje. */
 const PARENT_CHECK_MS = 10_000;
+
+/** Ile czekamy na pojedynczy etap zamykania, zanim pójdziemy dalej. */
+const SHUTDOWN_STEP_MS = 8000;
+
+/**
+ * Twardy limit całego zamykania. Musi być wyraźnie krótszy niż karencja
+ * launchera (SHUTDOWN_TIMEOUT_MS w scripts/uruchom.ts): to my znamy PID
+ * przeglądarki, więc to my mamy zdążyć ją zabrać, zanim on zabije nas.
+ */
+const SHUTDOWN_HARD_MS = 15_000;
 
 async function main(): Promise<void> {
     const { config, warnings, envFileFound } = loadConfig(ROOT_DIR);
@@ -121,6 +132,15 @@ async function main(): Promise<void> {
         log.info(result.message);
     }
 
+    // Przeglądarka z poprzedniego uruchomienia, która przeżyła swojego
+    // loggera, nadal trzyma profil sesji - nowa nie miałaby jak wstać.
+    const sieroty = killOrphanBrowsers(sessionProfileDir(ROOT_DIR));
+    if (sieroty.length > 0) {
+        log.warn(
+            `Zamknąłem przeglądarki po poprzednim uruchomieniu (PID ${sieroty.join(', ')}).`,
+        );
+    }
+
     const notifier = new Notifier(config);
     const client = createClient(config, ROOT_DIR);
     const archive = new Archive(config, client, config.dbEnabled ? db : null);
@@ -178,7 +198,10 @@ async function runMediaCheck(config: Config): Promise<void> {
         if (result.uwagi.length > 0) log.blank();
         for (const uwaga of result.uwagi) log.warn(uwaga);
     } finally {
-        await client.destroy().catch(() => undefined);
+        // Tak samo jak przy zamykaniu loggera: destroy() nie ma prawa zawiesić
+        // polecenia jednorazowego, a Chrome nie zniknie sam z siebie.
+        await withTimeout(client.destroy(), SHUTDOWN_STEP_MS).catch(() => undefined);
+        killBrowser(client);
     }
 }
 
@@ -760,6 +783,18 @@ class Runtime {
 
     private wireShutdown(): void {
         const stop = (signal: string): void => {
+            // Drugi sygnał znaczy "nie czekaj już na nic". Wcześniej robił to
+            // za nas puppeteer, wychodząc z procesu przy pierwszym Ctrl+C -
+            // i właśnie dlatego zapis bywał ucinany w połowie. Teraz pierwszy
+            // sygnał zapisuje, a o skróceniu tego decyduje człowiek.
+            //
+            // Wychodzimy zerem, bo to zatrzymanie z czyjejś woli, a nie awaria:
+            // nadzorca (launcher, pm2) nie ma czego po nim ponawiać.
+            if (this.shuttingDown) {
+                log.warn('Drugi sygnał - kończę natychmiast.');
+                killBrowser(this.client);
+                process.exit(0);
+            }
             void this.shutdown(signal);
         };
         process.on('SIGINT', () => stop('SIGINT'));
@@ -768,6 +803,13 @@ class Runtime {
         // połączenia SSH. Bez tej obsługi Node kończył proces na miejscu,
         // zostawiając niedopisane wiadomości i otwartego Chromium.
         process.on('SIGHUP', () => stop('SIGHUP'));
+
+        // Cokolwiek by nas nie zakończyło, przeglądarka ma odejść razem z nami.
+        // Puppeteer ma własny taki hak, ale to jest dokładnie ta awaria, którą
+        // naprawiamy - jedna linijka zapasu jest tu warta swojej ceny.
+        process.on('exit', () => {
+            killBrowser(this.client);
+        });
 
         this.watchParent();
 
@@ -786,21 +828,40 @@ class Runtime {
      *
      * Sygnały załatwiają zwykłe zamykanie, ale nie każde. Launcher zabity
      * twardo (SIGKILL, zapchana pamięć) nie zdąży już nikomu nic powiedzieć,
-     * a logger zostaje wtedy sierotą pod PID 1 - razem z Chromium, które
-     * potrafi ciągnąć procesor, dopóki ktoś ręcznie go nie znajdzie i nie ubije.
+     * a logger zostaje wtedy sierotą pod PID 1 - razem z Chrome, które trzyma
+     * profil sesji i nie pozwala wstać następnemu uruchomieniu.
      *
-     * Sprawdzamy konkretny PID przekazany w zmiennej środowiskowej, a nie samo
-     * "czy rodzic to init". Uruchomienie loggera wprost - z systemd albo z ręki -
-     * tej zmiennej nie ma i wtedy nic tu nie pilnujemy.
+     * Pierwszy strażnik to kanał IPC otwierany przez launcher przy spawn():
+     * gdy jego proces znika, my dostajemy 'disconnect' od razu, bez odpytywania.
+     * Kanał rozreferencowujemy, żeby polecenia jednorazowe (--sprawdz i spółka)
+     * mogły skończyć się same, zamiast czekać na zamknięcie potoku.
+     *
+     * Drugi strażnik to sprawdzenie, czy PID z WA_LOGGER_PARENT_PID nadal
+     * istnieje - potrzebny, gdy logger idzie z systemd albo wprost z ręki.
+     *
+     * Uwaga na pułapkę, która kosztowała nas te sieroty: process.ppid jest
+     * zwykłą wartością zapisaną raz przy starcie procesu, a nie żywym odczytem.
+     * Poprzednia wersja porównywała właśnie ją, więc osierocenia nie wykryła
+     * nigdy - warunek do końca życia procesu pozostawał prawdziwy.
      */
     private watchParent(): void {
+        const parentGone = (): void => {
+            if (this.shuttingDown) return;
+            log.warn('Program nadrzędny zniknął - zamykam się razem z nim.');
+            void this.shutdown('zniknął launcher');
+        };
+
+        if (process.channel) {
+            process.on('disconnect', parentGone);
+            process.channel.unref();
+        }
+
         const expected = Number(process.env[PARENT_PID_ENV]);
         if (!Number.isInteger(expected) || expected <= 1) return;
 
         this.parentWatchTimer = setInterval(() => {
-            if (this.shuttingDown || process.ppid === expected) return;
-            log.warn('Program nadrzędny zniknął - zamykam się razem z nim.');
-            void this.shutdown('zniknął launcher');
+            if (this.shuttingDown || processAlive(expected)) return;
+            parentGone();
         }, PARENT_CHECK_MS);
         this.parentWatchTimer.unref?.();
     }
@@ -813,6 +874,18 @@ class Runtime {
         log.blank();
         log.info(`Zatrzymuję (${signal}). Zapisuję to, co czeka w pamięci...`);
 
+        // Twardy limit na całość zamykania. Żaden z etapów niżej nie ma
+        // gwarancji, że w ogóle wróci - zawieszone browser.close() zostawiało
+        // proces w pamięci razem z Chrome, na 20% procesora, aż do ręcznego
+        // kill -9. Ten zegar jest jedyną rzeczą, która obiecuje wyjście.
+        const hardStop = setTimeout(() => {
+            log.error('Zamykanie się zacięło - kończę na twardo.', undefined, {
+                stage: 'zamykanie',
+            });
+            killBrowser(this.client);
+            process.exit(exitCode);
+        }, SHUTDOWN_HARD_MS);
+
         this.pauseOperationalTimers();
         this.clearReadyFallback();
         if (this.parentWatchTimer) {
@@ -821,28 +894,40 @@ class Runtime {
         }
 
         try {
-            await this.tau.stop();
+            await withTimeout(this.tau.stop(), SHUTDOWN_STEP_MS);
         } catch (err) {
             log.quiet(err, { stage: 'zamykanie tau' });
         }
 
         try {
-            await this.archive.flushAll();
-            log.info('✓ Wszystko zapisane.');
+            const zapis = await withTimeout(this.archive.flushAll(), SHUTDOWN_STEP_MS);
+            if (zapis === TIMED_OUT) {
+                log.warn('Zapis nie zdążył w całości - reszta czeka do następnego startu.');
+            } else {
+                log.info('✓ Wszystko zapisane.');
+            }
         } catch (err) {
             log.error('Nie udało się zapisać wszystkiego', err, { stage: 'zamykanie' });
         }
 
+        // Uprzejme zamknięcie przeglądarki potrafi nie wrócić nigdy - najczęściej
+        // wtedy, gdy strona WhatsAppa przestała odpowiadać. Dajemy mu chwilę,
+        // a potem i tak zabijamy proces Chrome: on nie zniknie sam z siebie,
+        // bo puppeteer odpala go odłączonego od naszej grupy procesów.
         try {
-            await this.client.destroy();
+            await withTimeout(this.client.destroy(), SHUTDOWN_STEP_MS);
         } catch {
             // Przeglądarka mogła już zniknąć - nic nie szkodzi.
         }
+        killBrowser(this.client);
+
         try {
-            await this.db.close();
+            await withTimeout(this.db.close(), SHUTDOWN_STEP_MS);
         } catch (err) {
             log.quiet(err, { stage: 'zamykanie bazy' });
         }
+
+        clearTimeout(hardStop);
         process.exit(exitCode);
     }
 }

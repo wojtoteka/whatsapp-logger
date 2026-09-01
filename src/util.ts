@@ -202,6 +202,53 @@ export function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * Czy proces o tym PID nadal istnieje. Sygnał 0 niczego nie wysyła -
+ * sprawdza wyłącznie, czy jest do kogo wysyłać.
+ *
+ * To jedyny żywy sposób na to pytanie. process.ppid wygląda podobnie, ale
+ * jest wartością zapisaną raz przy starcie procesu i nigdy się nie zmienia.
+ */
+export function processAlive(pid: number): boolean {
+    try {
+        process.kill(pid, 0);
+        return true;
+    } catch (err) {
+        // EPERM znaczy "jest, ale nie nasz" - czyli nadal żyje.
+        return (err as NodeJS.ErrnoException).code === 'EPERM';
+    }
+}
+
+/** Zwracane zamiast wyniku, gdy zadanie nie zdążyło w wyznaczonym czasie. */
+export const TIMED_OUT = Symbol('nie zdążyło');
+
+/**
+ * Czekanie z górnym limitem.
+ *
+ * Przy zamykaniu programu nie ma czegoś takiego jak "poczekamy, aż się uda":
+ * zawieszone browser.close() potrafi nie wrócić nigdy, a wtedy proces zostaje
+ * w pamięci razem z Chrome. Zadanie leci dalej w tle - my tylko przestajemy
+ * na nie czekać.
+ */
+export function withTimeout<T>(task: Promise<T>, ms: number): Promise<T | typeof TIMED_OUT> {
+    return new Promise((resolve, reject) => {
+        // Zegara nie rozreferencowujemy: to on ma dopilnować, że czekanie się
+        // skończy, a rozreferencowany nie odpaliłby się w ogóle, gdyby nie
+        // trzymało nas przy życiu nic poza nim.
+        const timer = setTimeout(() => resolve(TIMED_OUT), ms);
+        task.then(
+            (value) => {
+                clearTimeout(timer);
+                resolve(value);
+            },
+            (err: unknown) => {
+                clearTimeout(timer);
+                reject(err instanceof Error ? err : new Error(String(err)));
+            },
+        );
+    });
+}
+
 /** Same cyfry z identyfikatora WhatsAppa, o ile wyglądają na numer telefonu. */
 export function phoneDigits(value: unknown): string | null {
     const text =

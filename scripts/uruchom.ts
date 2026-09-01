@@ -19,6 +19,7 @@ import { isOneShot, normalizeCliArgs } from '../src/cli';
 import type { Config } from '../src/config';
 import { loadConfig } from '../src/config';
 import { createLanGuard, findFreePort } from '../src/lanGuard';
+import { killOrphanBrowsers, sessionProfileDir } from '../src/orphans';
 import { decideLoggerRestart } from '../src/restart';
 
 const ROOT_DIR = path.resolve(__dirname, '..', '..');
@@ -102,10 +103,12 @@ function ostrzezOBrakuKlucza(): void {
 function startLogger(): void {
     const child = spawn(process.execPath, [path.join(ROOT_DIR, 'dist', 'index.js'), ...loggerArgs], {
         cwd: ROOT_DIR,
-        stdio: 'inherit',
-        // Logger pilnuje, czy ten proces jeszcze żyje. Bez tego zabity twardo
-        // launcher zostawiał za sobą działającego loggera z otwartym Chromium,
-        // do końca dnia, aż ktoś go ręcznie znalazł i ubił.
+        // Trzy pierwsze strumienie jak dotąd, czwarty to kanał IPC. Nie idzie
+        // nim ani jedna wiadomość - liczy się to, że po naszej śmierci potok
+        // się zamyka i logger dostaje 'disconnect'. Działa to nawet wtedy, gdy
+        // zginiemy od SIGKILL i nie zdążymy nikomu nic powiedzieć.
+        stdio: ['inherit', 'inherit', 'inherit', 'ipc'],
+        // Zapasowy strażnik, gdyby logger poszedł kiedyś bez kanału IPC.
         env: { ...process.env, [PARENT_PID_ENV]: String(process.pid) },
     });
     track('logger', child);
@@ -306,7 +309,7 @@ function stopAll(code: number): void {
     }
 
     for (const { name, child } of children) {
-        if (child.exitCode !== null || child.killed) continue;
+        if (!zyje(child)) continue;
 
         if (name === 'logger' && process.platform !== 'win32') {
             child.kill('SIGTERM');
@@ -318,14 +321,30 @@ function stopAll(code: number): void {
     waitForLogger(code, Date.now() + SHUTDOWN_TIMEOUT_MS);
 }
 
+/**
+ * Czy dziecko jeszcze pracuje.
+ *
+ * Sam exitCode nie wystarczy: proces zakończony sygnałem ma tam null, a swój
+ * numer sygnału w signalCode. Poprzedni warunek uznawał więc zabitego loggera
+ * za wciąż żywego - czekał na niego pełne 20 sekund i wypisywał nieprawdę.
+ * Nie patrzymy też na killed: to znaczy tylko tyle, że sygnał został wysłany.
+ */
+function zyje(child: ChildProcess): boolean {
+    return child.exitCode === null && child.signalCode === null;
+}
+
 /** Sprawdza co chwilę, czy logger już skończył zapisywać. */
 function waitForLogger(code: number, deadline: number): void {
     const logger = children.findLast((c) => c.name === 'logger');
 
-    if (!logger || logger.child.exitCode !== null || Date.now() > deadline) {
-        if (logger && logger.child.exitCode === null) {
-            console.error('[logger] nie zamknął się na czas - kończę.');
-            logger.child.kill();
+    if (!logger || !zyje(logger.child) || Date.now() > deadline) {
+        if (logger && zyje(logger.child)) {
+            // SIGTERM poszedł na początku zamykania i nie poskutkował: logger
+            // albo wisi w zapisie, albo jest w trakcie własnego zamykania i
+            // drugiego takiego sygnału już nie obsłuży. Zostaje SIGKILL -
+            // poprzednia wersja wysyłała tu ponownie SIGTERM, czyli nic.
+            console.error('[logger] nie zamknął się na czas - zabijam.');
+            logger.child.kill('SIGKILL');
         }
         process.exit(code);
     }
@@ -345,9 +364,26 @@ for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) {
 // Ostatnia siatka: cokolwiek by nas nie zakończyło - błąd, process.exit() -
 // dzieci mają odejść razem z nami. kill() jest wywołaniem systemowym, więc
 // wolno go użyć nawet tutaj, gdzie nic asynchronicznego już się nie wykona.
+//
+// Idzie SIGKILL, a nie SIGTERM: na łagodne pożegnanie było miejsce wyżej,
+// tutaj nikt już nie zaczeka na to, co dziecko zechce jeszcze zrobić.
 process.on('exit', () => {
-    for (const { child } of children) {
-        if (child.exitCode === null && !child.killed) child.kill();
+    const dobiteLoggery: number[] = [];
+    for (const { name, child } of children) {
+        if (!zyje(child)) continue;
+        child.kill('SIGKILL');
+        if (name === 'logger' && child.pid !== undefined) dobiteLoggery.push(child.pid);
+    }
+
+    // Zabity twardo logger nie zdążył zamknąć swojej przeglądarki, a nikt inny
+    // tego nie zrobi: puppeteer odpala Chrome odłączonego, z własną grupą
+    // procesów i własną sesją, więc nie dociera do niego ani Ctrl+C, ani SIGHUP
+    // po zerwaniu SSH. Zostawiony sam sobie trzyma profil w .wwebjs_auth
+    // i blokuje następne uruchomienie.
+    if (dobiteLoggery.length === 0) return;
+    const zabite = killOrphanBrowsers(sessionProfileDir(ROOT_DIR), dobiteLoggery);
+    if (zabite.length > 0) {
+        console.error(`[logger] zamknąłem też jego przeglądarkę (PID ${zabite.join(', ')}).`);
     }
 });
 

@@ -6,7 +6,7 @@
 // w kółko na "any".
 
 import type { Client, Contact, Message } from 'whatsapp-web.js';
-import type { Page } from 'puppeteer';
+import type { Browser, Page } from 'puppeteer';
 
 /** Jak dobrą nazwę czatu udało się zdobyć. Wyżej znaczy lepiej. */
 export const NameTier = {
@@ -183,6 +183,8 @@ export interface WaMessage extends Message {
 
 export interface WaClient extends Client {
     pupPage?: Page;
+    /** Przeglądarka spod klienta - sięgamy po nią, żeby dobić proces Chrome. */
+    pupBrowser?: Browser;
 }
 
 /**
