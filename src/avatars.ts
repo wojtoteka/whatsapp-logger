@@ -125,7 +125,7 @@ export class AvatarStore {
         return latest ? this.relativePath(latest, chatDir) : null;
     }
 
-    // ── Pobieranie ───────────────────────────────────────────────────────
+    // -- Pobieranie -------------------------------------------------------
 
     /**
      * Pyta WhatsAppa o zdjęcie i zapisuje je jako nową wersję, o ile różni
@@ -215,7 +215,7 @@ export class AvatarStore {
         return null;
     }
 
-    // ── Dysk ─────────────────────────────────────────────────────────────
+    // -- Dysk -------------------------------------------------------------
 
     /** Zapisuje bajty jako kolejną wersję i zwraca ścieżkę względem _avatars. */
     private async writeFile(id: string, buffer: Buffer): Promise<string> {

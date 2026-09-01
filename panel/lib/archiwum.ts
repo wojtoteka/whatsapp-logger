@@ -38,9 +38,9 @@ export function logsDir(): string {
         : path.resolve(/* turbopackIgnore: true */ process.cwd(), '..', 'logs');
 }
 
-// ─────────────────────────────────────────────────────────────────────────
+// -------------------------------------------------------------------------
 //  Adresy
-// ─────────────────────────────────────────────────────────────────────────
+// -------------------------------------------------------------------------
 
 /**
  * Folder w postaci nadającej się do adresu. "Statusy/Kontakt" ma ukośnik,
@@ -76,9 +76,9 @@ export function toArchivePath(folder: string, relative: string | null): string |
     return normalized.startsWith('..') ? null : normalized;
 }
 
-// ─────────────────────────────────────────────────────────────────────────
+// -------------------------------------------------------------------------
 //  Odczyt plików
-// ─────────────────────────────────────────────────────────────────────────
+// -------------------------------------------------------------------------
 
 async function readJson<T>(file: string): Promise<T | null> {
     try {
@@ -125,9 +125,9 @@ async function readSource(folder: string, file: string): Promise<ArchivedMessage
     return Array.isArray(batch?.messages) ? batch.messages : [];
 }
 
-// ─────────────────────────────────────────────────────────────────────────
+// -------------------------------------------------------------------------
 //  Lista czatów
-// ─────────────────────────────────────────────────────────────────────────
+// -------------------------------------------------------------------------
 
 /** Wszystkie czaty w archiwum, osobno rozmowy i osobno relacje. */
 async function listChatsUncached(): Promise<{ rozmowy: ChatSummary[]; relacje: ChatSummary[] }> {
@@ -243,9 +243,9 @@ function previewOf(message: ArchivedMessage): string {
     return `${prefix}[${labels[message.type] ?? message.type}]`;
 }
 
-// ─────────────────────────────────────────────────────────────────────────
+// -------------------------------------------------------------------------
 //  Wiadomości czatu
-// ─────────────────────────────────────────────────────────────────────────
+// -------------------------------------------------------------------------
 
 export interface PageOptions {
     /** Ile wiadomości na stronę. */

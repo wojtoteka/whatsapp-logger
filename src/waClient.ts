@@ -101,9 +101,9 @@ export function createClient(config: Config, rootDir: string): WaClient {
     }) as WaClient;
 }
 
-// ─────────────────────────────────────────────────────────────────────────
+// -------------------------------------------------------------------------
 //  Pełna historia w kontrolowanych paczkach
-// ─────────────────────────────────────────────────────────────────────────
+// -------------------------------------------------------------------------
 
 export interface FullHistoryScan {
     supported: boolean;
@@ -201,9 +201,9 @@ export async function clearFullHistoryScan(client: WaClient, chatId: string): Pr
     }, chatId);
 }
 
-// ─────────────────────────────────────────────────────────────────────────
+// -------------------------------------------------------------------------
 //  Gotowość strony
-// ─────────────────────────────────────────────────────────────────────────
+// -------------------------------------------------------------------------
 
 export interface StoreHealth {
     /** Czy window.Store w ogóle istnieje. */
@@ -379,9 +379,9 @@ export function healthLine(health: StoreHealth): string {
     return `✓ Dane wczytane: ${health.contacts} kontaktów, ${health.chats} czatów.`;
 }
 
-// ─────────────────────────────────────────────────────────────────────────
+// -------------------------------------------------------------------------
 //  Odczyt prosto ze Store, bez serializacji całych modeli
-// ─────────────────────────────────────────────────────────────────────────
+// -------------------------------------------------------------------------
 //
 // getChats(), getChatById() i getBroadcasts() z whatsapp-web.js przepuszczają
 // modele przez getChatModel()/serialize(). Wystarczy jeden wadliwy model -
@@ -704,9 +704,9 @@ export async function listStatusMessages(client: WaClient): Promise<WaMessage[] 
     return toMessages(client, models);
 }
 
-// ─────────────────────────────────────────────────────────────────────────
+// -------------------------------------------------------------------------
 //  Nazwa czatu i zdjęcie profilowe bez serializacji modelu
-// ─────────────────────────────────────────────────────────────────────────
+// -------------------------------------------------------------------------
 
 /**
  * Nazwa czatu prosto z kolekcji Store.

@@ -10,6 +10,12 @@
 // Dlatego pytamy o jedyną rzecz, której nie da się podrobić: adres drugiego
 // końca gniazda TCP. Panel Next.js stoi wtedy na 127.0.0.1 i z zewnątrz nie
 // jest osiągalny w ogóle - widać wyłącznie tę bramkę.
+//
+// Obcy nie dostaje żadnej odpowiedzi - ani strony, ani kodu 403, ani nawet
+// pustego nagłówka. Gniazdo jest zrywane zaraz po połączeniu, więc z
+// internetu port zachowuje się tak, jakby nic za nim nie stało. Wcześniejsza
+// odpowiedź "tylko z sieci lokalnej" była sama w sobie informacją: potwierdzała
+// skanerowi, że pod tym adresem coś działa i warto wracać.
 
 import http from 'node:http';
 import net from 'node:net';
@@ -88,13 +94,16 @@ export function isAllowed(address: string | undefined | null, allowed: readonly 
 export function createLanGuard(options: LanGuardOptions): http.Server {
     const allowed = [...(options.allowed ?? [])];
 
+    /** Zrywa gniazdo bez słowa - obcy nie ma się czego uchwycić. */
+    const reject = (socket: Socket): void => {
+        options.onBlocked?.(normalizeAddress(socket.remoteAddress) ?? 'nieznany adres');
+        socket.destroy();
+    };
+
     const server = http.createServer((request, response) => {
         const address = request.socket.remoteAddress;
         if (!isAllowed(address, allowed)) {
-            options.onBlocked?.(address ?? 'nieznany adres');
-            response.writeHead(403, { 'Content-Type': 'text/plain; charset=utf-8' });
-            response.end('Panel jest dostępny tylko z sieci lokalnej.\n');
-            request.socket.destroy();
+            reject(request.socket);
             return;
         }
 
@@ -143,8 +152,7 @@ export function createLanGuard(options: LanGuardOptions): http.Server {
     server.on('upgrade', (request, socket: Socket, head: Buffer) => {
         const address = socket.remoteAddress;
         if (!isAllowed(address, allowed)) {
-            options.onBlocked?.(address ?? 'nieznany adres');
-            socket.destroy();
+            reject(socket);
             return;
         }
 
@@ -175,6 +183,14 @@ export function createLanGuard(options: LanGuardOptions): http.Server {
         socket.on('error', () => proxied.destroy());
         if (head.length > 0) proxied.write(head);
         proxied.end();
+    });
+
+    // Pierwsza i najtwardsza kontrola: zanim jeszcze przeczytamy jedną linię
+    // żądania. Obcy dostaje wyłącznie zamknięte gniazdo, więc przeglądarka
+    // pokazuje błąd połączenia zamiast strony z komunikatem. Kontrole wyżej
+    // zostają drugą siatką - i one też nigdy nie odpowiadają treścią.
+    server.on('connection', (socket: Socket) => {
+        if (!isAllowed(socket.remoteAddress, allowed)) reject(socket);
     });
 
     server.listen(options.port, options.host);

@@ -215,7 +215,7 @@ class Runtime {
         this.wireShutdown();
     }
 
-    // ── Logowanie i połączenie ───────────────────────────────────────────
+    // -- Logowanie i połączenie -------------------------------------------
 
     private wireAuth(): void {
         this.client.on('qr', (qr) => {
@@ -560,7 +560,7 @@ class Runtime {
         }
     }
 
-    // ── Wiadomości ───────────────────────────────────────────────────────
+    // -- Wiadomości -------------------------------------------------------
 
     private wireMessages(): void {
         // Odebrane
@@ -618,7 +618,7 @@ class Runtime {
         await this.tau.acceptOutgoing(message);
     }
 
-    // ── Przeglądy cykliczne ──────────────────────────────────────────────
+    // -- Przeglądy cykliczne ----------------------------------------------
 
     /** Relacje i zaległe zdjęcia profilowe. */
     private startSweep(): void {
@@ -715,7 +715,7 @@ class Runtime {
         }
     }
 
-    // ── Zamykanie ────────────────────────────────────────────────────────
+    // -- Zamykanie --------------------------------------------------------
 
     private wireShutdown(): void {
         const stop = (signal: string): void => {

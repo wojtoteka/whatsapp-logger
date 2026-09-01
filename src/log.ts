@@ -39,7 +39,7 @@ export class Log {
         this.errorFile = path.join(logsDir, '_bledy.json');
     }
 
-    // ── Linia postępu ────────────────────────────────────────────────────
+    // -- Linia postępu ----------------------------------------------------
 
     /**
      * Pisze w kółko po tej samej linii. Nie jest to komunikat, tylko stan,
@@ -66,7 +66,7 @@ export class Log {
         this.clearProgress();
     }
 
-    // ── Zwykłe komunikaty ────────────────────────────────────────────────
+    // -- Zwykłe komunikaty ------------------------------------------------
 
     debug(message: string): void {
         this.write('debug', message);
@@ -102,7 +102,7 @@ export class Log {
         stream.write(`${message}\n`);
     }
 
-    // ── Błędy ────────────────────────────────────────────────────────────
+    // -- Błędy ------------------------------------------------------------
 
     /**
      * Błąd wart pokazania użytkownikowi. Szczegóły lecą dodatkowo do pliku,

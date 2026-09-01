@@ -120,7 +120,7 @@ export class Notifier {
         });
     }
 
-    // ── Wysyłka ──────────────────────────────────────────────────────────
+    // -- Wysyłka ----------------------------------------------------------
 
     private async send(options: EmbedOptions): Promise<void> {
         if (!this.enabled) return;

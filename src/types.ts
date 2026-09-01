@@ -162,7 +162,7 @@ export interface AvatarRecord {
     versions: AvatarVersion[];
 }
 
-// ── Kształty, których nie ma w deklaracjach whatsapp-web.js ──────────────
+// -- Kształty, których nie ma w deklaracjach whatsapp-web.js --------------
 
 /** Pola, które biblioteka wkłada do wiadomości, a których nie deklaruje. */
 export interface RawMessageData {

@@ -81,30 +81,29 @@ export class WhatsAppTauProvider {
     /** Wywoływane dla każdej odebranej wiadomości przed parserem ?tau. */
     async acceptIncoming(message: WaMessage): Promise<boolean> {
         const active = this.active;
-        if (!active || message.fromMe || message.type !== 'chat') return false;
+        if (!active || message.fromMe) return false;
+        if (!(await this.isFromProvider(message, active.providerId))) return false;
 
-        let sender = chatIdOf(message);
-        if (sender !== active.providerId) {
-            try {
-                const contact = await message.getContact();
-                const number = typeof contact?.number === 'string' ? contact.number.replace(/\D/g, '') : '';
-                if (number !== this.number) return false;
-                sender = active.providerId;
-            } catch {
-                return false;
-            }
+        // Załącznik nie ma jak nieść markera, więc parser nigdy go nie dopasuje.
+        // Bez tej gałęzi obrazek od providera przechodził bokiem, a żądanie wisiało
+        // aż do końca timeoutu - razem z całą kolejką następnych pytań.
+        if (message.type !== 'chat') {
+            this.settle(
+                active,
+                new Error(
+                    `Provider ?tau odesłał załącznik (${message.type}) zamiast tekstu z markerem.`,
+                ),
+            );
+            return true;
         }
-        if (sender !== active.providerId) return false;
 
         const parsed = parseProviderResponse(message.body, active.marker);
         if (!parsed.matched) return false;
 
-        clearTimeout(active.timer);
-        this.active = null;
         if (!parsed.answer) {
-            active.reject(new Error('Provider ?tau zwrócił pustą odpowiedź po markerze.'));
+            this.settle(active, new Error('Provider ?tau zwrócił pustą odpowiedź po markerze.'));
         } else {
-            active.resolve(parsed.answer);
+            this.settle(active, parsed.answer);
         }
         return true;
     }
@@ -137,6 +136,30 @@ export class WhatsAppTauProvider {
         clearTimeout(active.timer);
         this.active = null;
         active.reject(new Error('Logger został zatrzymany podczas oczekiwania na odpowiedź ?tau.'));
+    }
+
+    /**
+     * Czy ta wiadomość przyszła od providera. WhatsApp potrafi podać inny
+     * identyfikator rozmowy niż ten z getNumberId (np. @lid), więc przy
+     * niezgodności pytamy jeszcze o numer kontaktu.
+     */
+    private async isFromProvider(message: WaMessage, providerId: string): Promise<boolean> {
+        if (chatIdOf(message) === providerId) return true;
+        try {
+            const contact = await message.getContact();
+            const number = typeof contact?.number === 'string' ? contact.number.replace(/\D/g, '') : '';
+            return number === this.number;
+        } catch {
+            return false;
+        }
+    }
+
+    /** Domyka oczekiwanie - odpowiedzią albo błędem - i zwalnia kolejkę. */
+    private settle(active: ActiveRequest, result: string | Error): void {
+        clearTimeout(active.timer);
+        if (this.active === active) this.active = null;
+        if (result instanceof Error) active.reject(result);
+        else active.resolve(result);
     }
 
     private async askOne(

@@ -378,7 +378,7 @@ Skasowanie relacji z archiwum znaczy „pobierz ją jeszcze raz". Gdy folderu al
 
 Sam adres nasłuchiwania nie wystarcza, gdy router przekazuje ruch z internetu na tę maszynę - przy DMZ albo przekierowaniu portu połączenie z internetu trafia na dokładnie ten sam adres LAN, na którym stoi panel. Nie wystarcza też nagłówek `X-Forwarded-For`: Next.js ustawia go tylko wtedy, gdy klient sam go nie przysłał, a przysłać może go każdy.
 
-Dlatego przy `PANEL_LAN_ONLY=true` (domyślnie) panel Next.js nasłuchuje na `127.0.0.1`, a na `PANEL_HOST:PANEL_PORT` staje bramka, która sprawdza adres drugiego końca połączenia TCP - jedyną wartość, której klient nie ustawia. Z zewnątrz widać wyłącznie bramkę, a ta odpowiada wtedy kodem 403.
+Dlatego przy `PANEL_LAN_ONLY=true` (domyślnie) panel Next.js nasłuchuje na `127.0.0.1`, a na `PANEL_HOST:PANEL_PORT` staje bramka, która sprawdza adres drugiego końca połączenia TCP - jedyną wartość, której klient nie ustawia. Z zewnątrz widać wyłącznie bramkę, a ta nie odpowiada obcemu niczym: zrywa gniazdo zaraz po połączeniu, bez strony, bez kodu HTTP i bez nagłówków. Przeglądarka spod publicznego adresu dostaje zwykły błąd połączenia, więc port wygląda tak, jakby nic za nim nie stało - wcześniejszy komunikat "tylko z sieci lokalnej" sam potwierdzał skanerowi, że jest tu coś do znalezienia.
 
 Przepuszczane są adresy `10.x`, `172.16-31.x`, `192.168.x`, `127.x`, `169.254.x` oraz ich odpowiedniki w IPv6 (`::1`, `fc00::/7`, `fe80::/10`). Adresy spoza tych zakresów - na przykład VPN Tailscale, który używa `100.64.0.0/10` - dopisuje się do `PANEL_ALLOWED_IPS`:
 

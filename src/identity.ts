@@ -189,7 +189,7 @@ export class IdentityResolver {
     }
 }
 
-// ── Funkcje bez stanu, wygodne do testowania osobno ──────────────────────
+// -- Funkcje bez stanu, wygodne do testowania osobno ----------------------
 
 /**
  * Wyciąga z kontaktu trzy rzeczy, które nas interesują. Uwaga na @lid:

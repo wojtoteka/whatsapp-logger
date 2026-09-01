@@ -27,9 +27,9 @@ const DELETED_SLOT = { open: '<!--del-->', close: '<!--/del-->' } as const;
  */
 const ACK_SLOT = { open: '<!--ack-->', close: '<!--/ack-->' } as const;
 
-// ─────────────────────────────────────────────────────────────────────
+// ---------------------------------------------------------------------
 //  Tekst
-// ─────────────────────────────────────────────────────────────────────
+// ---------------------------------------------------------------------
 
 /**
  * Escapuje znaki HTML. Używane też w atrybutach, więc bez zamiany
@@ -107,9 +107,9 @@ export function typeLabel(type: string): string {
     return name ? `[${name}]` : '[media]';
 }
 
-// ─────────────────────────────────────────────────────────────────────
+// ---------------------------------------------------------------------
 //  Daty
-// ─────────────────────────────────────────────────────────────────────
+// ---------------------------------------------------------------------
 
 function formatTimestamp(ts: number): string {
     return new Date(ts * 1000).toLocaleString('pl-PL', {
@@ -150,9 +150,9 @@ function formatIsoStamp(iso: string): string {
     return Number.isFinite(value) ? formatTimestamp(value / 1000) : '';
 }
 
-// ─────────────────────────────────────────────────────────────────────
+// ---------------------------------------------------------------------
 //  Ikony (zestaw wbudowany w plik, bez zewnętrznych bibliotek)
-// ─────────────────────────────────────────────────────────────────────
+// ---------------------------------------------------------------------
 
 const ICON_SPRITE = `
 <svg class="sprite" aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg">
@@ -175,9 +175,9 @@ function icon(name: string, extraClass = ''): string {
     return `<svg class="${`icon ${extraClass}`.trim()}" aria-hidden="true" focusable="false"><use href="#i-${name}"></use></svg>`;
 }
 
-// ─────────────────────────────────────────────────────────────────────
+// ---------------------------------------------------------------------
 //  Fragmenty wiadomości
-// ─────────────────────────────────────────────────────────────────────
+// ---------------------------------------------------------------------
 
 const IMAGE_EXT = ['jpg', 'jpeg', 'png', 'gif', 'webp'];
 const VIDEO_EXT = ['mp4', '3gp', 'mov', 'avi', 'webm'];
@@ -429,9 +429,9 @@ function renderStream(messages: ArchivedMessage[]): string {
     return html;
 }
 
-// ─────────────────────────────────────────────────────────────────────
+// ---------------------------------------------------------------------
 //  Dopisywanie do gotowego pliku
-// ─────────────────────────────────────────────────────────────────────
+// ---------------------------------------------------------------------
 
 /** Nazwa pliku danej części - jedno miejsce, żeby nie rozjechać formatu. */
 export function batchFileName(batchNum: number): string {
@@ -505,9 +505,9 @@ export function markAckInHtml(html: string, messageId: string, msg: ArchivedMess
     return html.slice(0, slotStart + ACK_SLOT.open.length) + fresh + html.slice(slotEnd);
 }
 
-// ─────────────────────────────────────────────────────────────────────
+// ---------------------------------------------------------------------
 //  Nawigacja
-// ─────────────────────────────────────────────────────────────────────
+// ---------------------------------------------------------------------
 
 export function buildNextLink(batchNum: number): string {
     return `<a class="pager-link" href="${batchFileName(batchNum)}" rel="next">Część ${batchNum}${icon('next')}</a>`;
@@ -523,9 +523,9 @@ function buildPrevLink(batchNum: number): string {
         : `<span class="pager-link off">${icon('prev')}To pierwsza część</span>`;
 }
 
-// ─────────────────────────────────────────────────────────────────────
+// ---------------------------------------------------------------------
 //  Cały plik
-// ─────────────────────────────────────────────────────────────────────
+// ---------------------------------------------------------------------
 
 export interface HtmlOptions {
     chatName: string;
@@ -641,7 +641,7 @@ a{color:var(--sea)}
 a:hover{color:#68D9CB}
 :focus-visible{outline:2px solid var(--sea);outline-offset:2px}
 
-/* ── Pasek czatu, przykleja się przy przewijaniu ── */
+/* -- Pasek czatu, przykleja się przy przewijaniu -- */
 .topbar{
     position:sticky;top:0;z-index:10;
     background:rgba(10,26,32,.94);
@@ -664,7 +664,7 @@ a:hover{color:#68D9CB}
 .topbar .sub{font-size:12px;color:var(--dim);margin-top:3px}
 .topbar .sub b{font-weight:600;color:var(--text)}
 
-/* ── Karta z danymi pliku ── */
+/* -- Karta z danymi pliku -- */
 .facts{
     border:1px solid var(--edge);
     border-left:2px solid var(--sea);
@@ -677,7 +677,7 @@ a:hover{color:#68D9CB}
 .facts dt{color:var(--dim)}
 .facts dd{font-family:var(--mono);font-size:12.5px;text-align:right}
 
-/* ── Nawigacja ── */
+/* -- Nawigacja -- */
 .pager{
     display:flex;justify-content:space-between;align-items:center;
     gap:10px;flex-wrap:wrap;padding:14px 0;
@@ -695,7 +695,7 @@ a:hover{color:#68D9CB}
     color:var(--dim);cursor:default;background:none;
 }
 
-/* ── Wiadomości ── */
+/* -- Wiadomości -- */
 .stream{padding:2px 0 6px}
 
 .msg{display:flex;align-items:flex-end;gap:9px;margin:9px 0}
@@ -746,7 +746,7 @@ a:hover{color:#68D9CB}
 .ack .icon{width:14px;height:14px;stroke-width:2.1}
 .ack.read{color:#7fd4ff}
 
-/* ── Separator dnia ── */
+/* -- Separator dnia -- */
 .day{display:flex;justify-content:center;margin:22px 0 14px}
 .day h2{
     font-family:var(--serif);font-weight:400;font-size:13.5px;
@@ -757,7 +757,7 @@ a:hover{color:#68D9CB}
     padding:4px 15px;
 }
 
-/* ── Cytat ── */
+/* -- Cytat -- */
 .quote{
     background:rgba(10,26,32,.42);
     border-left:3px solid var(--sea);
@@ -769,7 +769,7 @@ a:hover{color:#68D9CB}
 .msg.own .quote-who{color:var(--n1)}
 .quote-body{font-size:12.5px;color:var(--dim);line-height:1.4}
 
-/* ── Media ── */
+/* -- Media -- */
 .media{margin:2px 0 6px}
 .media img,.media video{
     display:block;max-width:min(100%,320px);height:auto;
@@ -843,7 +843,7 @@ a:hover{color:#68D9CB}
     font-size:12.5px;color:#F08A7C;
 }
 
-/* ── Stopka ── */
+/* -- Stopka -- */
 .colophon{
     margin-top:22px;padding-top:13px;
     border-top:1px solid var(--edge);
@@ -851,7 +851,7 @@ a:hover{color:#68D9CB}
 }
 .colophon p+p{margin-top:4px}
 
-/* ── Podgląd zdjęcia ── */
+/* -- Podgląd zdjęcia -- */
 .lightbox{
     display:none;position:fixed;inset:0;z-index:60;
     background:rgba(5,14,18,.95);

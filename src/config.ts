@@ -101,7 +101,7 @@ export function loadEnvFile(rootDir: string): boolean {
     return true;
 }
 
-// ── Odczyt pojedynczych wartości ─────────────────────────────────────────
+// -- Odczyt pojedynczych wartości -----------------------------------------
 
 type Env = Record<string, string | undefined>;
 

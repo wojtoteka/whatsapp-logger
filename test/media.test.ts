@@ -116,7 +116,7 @@ test('plik równy limitowi 100 MB nadal może zostać pobrany', async () => {
     });
 });
 
-// ── Pobieranie wprost ze Store ───────────────────────────────────────────
+// -- Pobieranie wprost ze Store -------------------------------------------
 
 /**
  * Uruchamia page.evaluate() na tym procesie. Kod z media.ts sięga po
@@ -208,7 +208,7 @@ test('brak DownloadManagera kończy się pustką, a nie wyjątkiem', async () =>
     assert.match(result.why ?? '', /DownloadManager/);
 });
 
-// ── Powód niepowodzenia ──────────────────────────────────────────────────
+// -- Powód niepowodzenia --------------------------------------------------
 //
 // Dopóki każda porażka wracała jako samo null, w archiwum stała notatka
 // "nie udało się pobrać pliku" i nie dało się z niej wyczytać, czy plik

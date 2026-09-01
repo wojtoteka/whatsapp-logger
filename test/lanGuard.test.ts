@@ -87,7 +87,7 @@ test('bramka przepuszcza połączenie z pętli zwrotnej i podmienia X-Forwarded-
     }
 });
 
-test('bramka nie dopuszcza do panelu, gdy adres nie przechodzi kontroli', async () => {
+test('bramka zrywa połączenie bez odpowiedzi, gdy adres nie przechodzi kontroli', async () => {
     let panelCalls = 0;
     const panel = http.createServer((_request, response) => {
         panelCalls++;
@@ -108,17 +108,21 @@ test('bramka nie dopuszcza do panelu, gdy adres nie przechodzi kontroli', async 
     });
     await once(guard, 'listening');
 
-    // Podmieniamy widok gniazda na adres z internetu.
+    // Podmieniamy widok gniazda na adres z internetu. Nasłuch bramki na
+    // 'connection' jest zarejestrowany wcześniej niż ten, więc zobaczy jeszcze
+    // prawdziwe 127.0.0.1 - odmowę wyłapuje dopiero kontrola przy żądaniu.
     guard.on('connection', (socket) => {
         Object.defineProperty(socket, 'remoteAddress', { value: '8.8.8.8', configurable: true });
     });
 
     try {
         const port = (guard.address() as AddressInfo).port;
-        const answer = await get(port);
 
-        assert.equal(answer.status, 403);
-        assert.match(answer.body, /sieci lokalnej/);
+        // Żadnego kodu HTTP ani treści: klient dostaje wyłącznie zerwane gniazdo.
+        await assert.rejects(get(port), (error: NodeJS.ErrnoException) => {
+            assert.equal(error.code, 'ECONNRESET');
+            return true;
+        });
         assert.equal(panelCalls, 0, 'panel nie dostał tego żądania w ogóle');
         assert.deepEqual(blocked, ['8.8.8.8']);
     } finally {
@@ -127,7 +131,7 @@ test('bramka nie dopuszcza do panelu, gdy adres nie przechodzi kontroli', async 
     }
 });
 
-// ── Drobiazgi ────────────────────────────────────────────────────────────
+// -- Drobiazgi ------------------------------------------------------------
 
 function listen(server: http.Server): Promise<void> {
     return new Promise((resolve, reject) => {

@@ -301,7 +301,7 @@ test('wskazanie nieistniejącej przeglądarki nie kończy się jej użyciem', ()
     assert.notEqual(found, path.join('nie', 'ma', 'takiego', 'chrome.exe'));
 });
 
-// ── Odczyt prosto ze Store ───────────────────────────────────────────────
+// -- Odczyt prosto ze Store -----------------------------------------------
 //
 // Te testy wykonują kod, który normalnie leci do Chromium. Nie sprawdzą, czy
 // WhatsApp Web faktycznie ma dziś taką kolekcję - to da się zobaczyć tylko na
@@ -497,7 +497,7 @@ test('relacje czytamy wprost z kolekcji, a jedna wadliwa nie zabiera reszty', as
     assert.deepEqual(result?.map((message) => messageKey(message)), ['relacja-1', 'relacja-2']);
 });
 
-// ── Nazwa czatu i zdjęcie profilowe wprost ze Store ──────────────────────
+// -- Nazwa czatu i zdjęcie profilowe wprost ze Store ----------------------
 
 /** Kolekcja Store w kształcie, jakiego używa odczyt po identyfikatorze. */
 function byId(entries: Record<string, unknown>): { get(key: unknown): unknown } {

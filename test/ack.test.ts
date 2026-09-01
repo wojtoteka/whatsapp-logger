@@ -96,7 +96,7 @@ test('stan czytamy wprost z wiadomości WhatsAppa', () => {
     assert.equal(isRead(ACK.DEVICE), false);
 });
 
-// ── Zapis w pliku HTML ───────────────────────────────────────────────────
+// -- Zapis w pliku HTML ---------------------------------------------------
 
 function html(messages: ArchivedMessage[]): string {
     return generateHtml({

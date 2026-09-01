@@ -6,7 +6,7 @@ import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
 import path from 'node:path';
 
-// ── Nazwy plików i folderów ──────────────────────────────────────────────
+// -- Nazwy plików i folderów ----------------------------------------------
 
 /** Znaki, których Windows nie przyjmie w nazwie pliku. */
 const ILLEGAL = /[<>:"/\\|?*\u0000-\u001f]/g;
@@ -50,7 +50,7 @@ export function toPosixPath(value: string): string {
     return value.split(path.sep).join('/');
 }
 
-// ── Dysk ─────────────────────────────────────────────────────────────────
+// -- Dysk -----------------------------------------------------------------
 
 export async function ensureDir(dir: string): Promise<void> {
     await fs.mkdir(dir, { recursive: true });
@@ -181,7 +181,7 @@ export async function listDirents(dir: string): Promise<fsSync.Dirent[]> {
     }
 }
 
-// ── Formatowanie ─────────────────────────────────────────────────────────
+// -- Formatowanie ---------------------------------------------------------
 
 export function formatBytes(bytes: number | null | undefined): string | null {
     if (bytes === null || bytes === undefined || !Number.isFinite(bytes) || bytes < 0) return null;

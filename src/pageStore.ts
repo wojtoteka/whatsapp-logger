@@ -115,9 +115,9 @@ export function pageAccessLine(access: PageAccess): string {
     return `wnętrze WhatsApp Weba niedostępne${missing}`;
 }
 
-// ─────────────────────────────────────────────────────────────────────────
+// -------------------------------------------------------------------------
 //  Kod wykonywany w stronie
-// ─────────────────────────────────────────────────────────────────────────
+// -------------------------------------------------------------------------
 
 /**
  * Stan pomocnika. Osobne, tanie zapytanie - żeby nie wstrzykiwać go od nowa
