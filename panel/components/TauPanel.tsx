@@ -31,6 +31,7 @@ export function TauPanel({ folder, enabled }: { folder: string; enabled: boolean
         setPhase('sending');
         setAnswer('');
         setError('');
+        setQuestion('');
 
         try {
             const response = await fetch('/api/tau', {
