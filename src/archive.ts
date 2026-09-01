@@ -126,6 +126,8 @@ interface ChatState {
     name: string;
     nameTier: NameTier;
     isStatus: boolean;
+    /** Grupa - zdjęcie czatu ma wtedy tylko sama grupa, nie jej uczestnicy. */
+    isGroup: boolean;
     /** Nazwa folderu względem logs/. Dla relacji "Statusy/<autor>". */
     safeName: string;
     chatDir: string;
@@ -491,8 +493,10 @@ export class Archive {
         await this.db?.saveMessage(row);
 
         // Zdjęcie czatu w bazie aktualizujemy tylko wtedy, gdy faktycznie się
-        // zmieniło - inaczej byłby jeden UPDATE na każdą wiadomość.
-        if (row.avatarPath && row.avatarPath !== state.lastAvatarPath) {
+        // zmieniło - inaczej byłby jeden UPDATE na każdą wiadomość. W grupie
+        // pomijamy to zupełnie: przy wiadomości leży zdjęcie jej nadawcy, a nie
+        // grupy - to drugie bierze się wyłącznie z przeglądu refreshAvatars().
+        if (!state.isGroup && row.avatarPath && row.avatarPath !== state.lastAvatarPath) {
             state.lastAvatarPath = row.avatarPath;
             state.currentAvatar = avatar;
             await this.db?.setChatAvatar(state.id, row.avatarPath);
@@ -1353,6 +1357,7 @@ export class Archive {
             name: useName,
             nameTier: useTier,
             isStatus: isStatusChat(chatId),
+            isGroup: chatId.endsWith('@g.us'),
             safeName,
             chatDir,
             mediaDir,
@@ -2103,13 +2108,18 @@ export class Archive {
                 current = this.avatars.cachedPathFor(id, state.chatDir);
                 if (current) break;
             }
-            if (!current || current === state.currentAvatar) continue;
+            if (current === state.currentAvatar) continue;
+            // Brakiem zdjęcia nadpisujemy tylko grupę. Grupa bez zdjęcia ma
+            // mieć pusty kafelek, a nie zdjęcie uczestnika, które mogło się
+            // tam zapisać wcześniej; w rozmowie z jedną osobą zdjęcie z
+            // wiadomości jest w porządku i nie ma go po co kasować.
+            if (!current && !state.isGroup) continue;
 
             state.currentAvatar = current;
             await this.saveState(state);
             await this.db?.setChatAvatar(
                 state.id,
-                toDatabaseArchivePath(state.safeName, current),
+                current ? toDatabaseArchivePath(state.safeName, current) : null,
             );
         }
         return stats;
@@ -2264,7 +2274,7 @@ export class Archive {
             nameTier: state.nameTier,
             folder: state.safeName,
             isStatus: state.isStatus,
-            isGroup: state.id.endsWith('@g.us'),
+            isGroup: state.isGroup,
         });
     }
 

@@ -77,6 +77,39 @@ export function toArchivePath(folder: string, relative: string | null): string |
 }
 
 // -------------------------------------------------------------------------
+//  Grupy
+// -------------------------------------------------------------------------
+
+/**
+ * Foldery, w których siedzą grupy. Logger trzyma w _czaty.json powiązanie
+ * identyfikatora WhatsAppa z folderem, a grupa ma identyfikator zakończony
+ * na "@g.us" - to jedyne miejsce w archiwum, po którym da się ją poznać.
+ */
+const groupFolders = cache(async (): Promise<ReadonlySet<string>> => {
+    const index = await readJson<Record<string, { safeName?: string }>>(
+        path.join(logsDir(), '_czaty.json'),
+    );
+
+    const folders = new Set<string>();
+    for (const [id, entry] of Object.entries(index ?? {})) {
+        if (id.endsWith('@g.us') && entry?.safeName) folders.add(entry.safeName);
+    }
+    return folders;
+});
+
+/**
+ * Czy zdjęcie należy do samej grupy, a nie do któregoś z uczestników. Wersje
+ * leżą w _avatars/<identyfikator>/, gdzie "@" jest zamienione na "_", więc
+ * grupę poznajemy po końcówce "_g.us" w nazwie folderu ze zdjęciami.
+ */
+function isGroupAvatar(archivePath: string | null): boolean {
+    if (!archivePath) return false;
+    const parts = archivePath.split('/');
+    const at = parts.indexOf('_avatars');
+    return at >= 0 && parts[at + 1]?.endsWith('_g.us') === true;
+}
+
+// -------------------------------------------------------------------------
 //  Odczyt plików
 // -------------------------------------------------------------------------
 
@@ -202,12 +235,23 @@ async function summarize(folder: string): Promise<ChatSummary | null> {
 
     // Zdjęcie profilowe bierzemy z najnowszej wiadomości, która je ma -
     // dzięki temu na liście widać to aktualne.
+    //
+    // W grupie tak nie wolno: przy wiadomości leży zdjęcie jej nadawcy, więc
+    // kafelek grupy pokazywałby ostatnią osobę, która coś napisała. Grupa ma
+    // własne zdjęcie w _state.json - i tylko takie tu przyjmujemy, bo starsze
+    // wersje loggera wpisywały w to pole zdjęcie uczestnika.
+    const isGroup = (await groupFolders()).has(folder);
     let avatar: string | null = toArchivePath(folder, state?.avatar ?? null);
-    for (let i = newest.length - 1; i >= 0; i--) {
-        const candidate = newest[i]?.avatar;
-        if (candidate) {
-            avatar = toArchivePath(folder, candidate);
-            break;
+
+    if (isGroup) {
+        if (!isGroupAvatar(avatar)) avatar = null;
+    } else {
+        for (let i = newest.length - 1; i >= 0; i--) {
+            const candidate = newest[i]?.avatar;
+            if (candidate) {
+                avatar = toArchivePath(folder, candidate);
+                break;
+            }
         }
     }
 
