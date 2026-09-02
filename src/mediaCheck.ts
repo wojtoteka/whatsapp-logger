@@ -179,10 +179,15 @@ async function describeModel(message: WaMessage): Promise<string> {
             const msg = safe(() => store?.Msg?.get?.(wanted), null);
             if (!msg) return 'nie ma go w Store.Msg';
 
+            // Te same dwa źródła co przy pobieraniu - inaczej diagnoza mówiłaby
+            // "directPath BRAK" o pliku, który zaraz potem schodzi z mediaData.
+            const field = (name: string): any =>
+                safe(() => msg[name], null) ?? safe(() => msg.mediaData?.[name], null);
+
             const czesci = [
                 `etap: ${safe(() => String(msg.mediaData?.mediaStage ?? '(brak)'), '(nie do odczytu)')}`,
-                safe(() => msg.directPath, null) ? 'directPath jest' : 'directPath BRAK',
-                safe(() => msg.mediaKey, null) ? 'mediaKey jest' : 'mediaKey BRAK',
+                field('directPath') ? 'directPath jest' : 'directPath BRAK',
+                field('mediaKey') ? 'mediaKey jest' : 'mediaKey BRAK',
                 safe(() => msg.mediaData?.mediaBlob, null)
                     ? 'gotowy plik w przeglądarce'
                     : 'bez gotowego pliku',

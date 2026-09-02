@@ -610,6 +610,19 @@ a:hover {
 .msg.own .quote {
     border-left-color: var(--n1);
 }
+.quote-head {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--dim);
+    margin-bottom: 2px;
+}
+.quote-head .material-icon {
+    font-size: 14px;
+}
 .quote-who {
     font-size: 12.5px;
     font-weight: 600;

@@ -32,6 +32,8 @@ export function testConfig(logsDir: string, overrides: Partial<Config> = {}): Co
         saveStatuses: true,
         sweepCheckHours: 6,
 
+        saveChannels: false,
+
         retentionEnabled: true,
         retentionDays: 180,
         retentionCheckHours: 12,
@@ -144,6 +146,15 @@ export interface FakeMessageOptions {
      * pola _serialized, bo whatsapp-web.js buduje je z surowego serialize().
      */
     rawStatusId?: boolean;
+    /** Wiadomość, na którą ta odpowiada - ustawia też hasQuotedMsg. */
+    quoted?: FakeMessageOptions | null;
+    /**
+     * getQuotedMessage() rzuca wyjątkiem, tak jak przy zminifikowanym "r: r"
+     * z serialize() - wtedy cytat musi znaleźć się inną drogą albo wcale.
+     */
+    quotedBroken?: boolean;
+    /** Dodatkowe pola surowego _data, którymi posługuje się whatsapp-web.js. */
+    data?: Record<string, unknown>;
 }
 
 /** Udawana wiadomość w kształcie, jaki podaje whatsapp-web.js. */
@@ -166,12 +177,15 @@ export function fakeMessage(options: FakeMessageOptions = {}): WaMessage {
         type: options.type ?? 'chat',
         hasMedia: options.hasMedia ?? false,
         ack: options.ack,
-        hasQuotedMsg: false,
+        hasQuotedMsg: options.quoted != null || options.quotedBroken === true,
         isForwarded: false,
         isStatus: options.isStatus ?? false,
         vCards: [],
         location: undefined,
-        _data: options.notifyName ? { notifyName: options.notifyName } : {},
+        _data: {
+            ...(options.notifyName ? { notifyName: options.notifyName } : {}),
+            ...options.data,
+        },
 
         async getChat() {
             if (options.chatName === undefined || options.chatName === null) {
@@ -182,6 +196,10 @@ export function fakeMessage(options: FakeMessageOptions = {}): WaMessage {
         async getContact() {
             if (!options.contact) throw new Error('brak kontaktu');
             return options.contact;
+        },
+        async getQuotedMessage() {
+            if (options.quotedBroken) throw new Error('r: r');
+            return options.quoted ? fakeMessage(options.quoted) : null;
         },
         async downloadMedia() {
             return null;

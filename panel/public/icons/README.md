@@ -8,6 +8,7 @@ z wariantu `materialsymbolsoutlined` w rozmiarze 24 px:
 - `attach_file`
 - `delete`
 - `forward`
+- `reply`
 - `arrow_back`
 - `arrow_forward`
 

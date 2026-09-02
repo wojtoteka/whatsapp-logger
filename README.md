@@ -249,6 +249,10 @@ Polecenie łączy się z żywą sesją i pokazuje dla kilku wiadomości z kolejk
 
 Logger próbuje temu zapobiec na dwa sposoby. Przy zapisie czeka w przeglądarce na zakończenie pobierania zamiast poprzestawać na pustej odpowiedzi, prosi telefon o ponowne wysłanie wygasłego pliku i szuka wiadomości także przez `getMessagesById`, gdy nie ma jej już w pamięci strony. Na żywo czeka krótko (8 s), bo kolejka czatu stoi; w przeglądzie zaległości długo (45 s), bo tam nikt nie czeka, a tyle właśnie zajmuje telefonowi ponowne wysłanie zdjęcia.
 
+Opis pliku - `directPath`, `mediaKey`, `mimetype`, `encFilehash` - czytany jest z dwóch miejsc naraz: z modelu wiadomości i z `msg.mediaData`. To nie jest to samo miejsce. Po ponownym wysłaniu przez telefon i przy wiadomościach dociągniętych z historii nowy komplet ląduje wyłącznie w `mediaData`, a na modelu zostaje puste miejsce po starym - czytanie samego modelu kończyło się wtedy notatką „WhatsApp nie ma już adresu ani klucza do tego pliku", mimo że komplet leżał obok.
+
+Osobno traktowana jest świeżość wiadomości. Licznik nieudanych plików ogranicza liczbę podejść w czacie, żeby nadrabianie starej historii nie dokładało kilku sekund do każdej wiadomości - tam pliki zwykle naprawdę już nie istnieją. Wiadomość młodsza niż 5 minut jest z tego limitu wyłączona i zawsze dostaje komplet trzech podejść: to jej WhatsApp Web dopiero zaczyna ściągać plik, a jedno natychmiastowe podejście gubiło pojedyncze zdjęcia w czacie, w którym wcześniej przepadło trochę starych.
+
 Jeżeli mimo to plik nie przyszedł, wiadomość trafia do `logs/_media_do_pobrania.json`. Przy każdym przeglądzie (`SWEEP_CHECK_HOURS`, domyślnie co 6 godzin) logger wraca do takich wiadomości, a po udanym pobraniu podmienia notatkę na plik w `messages_XXXX.json`, w odpowiadającym mu pliku HTML i w bazie. Kolejka działa niezależnie od `SAVE_STATUSES` i `SAVE_PROFILE_PICS` - naprawia to, co już jest w archiwum. Relacji szuka w kolekcji `Store.Status`, bo `getMessageById()` zagląda wyłącznie do `Store.Msg`, gdzie relacji nigdy nie było. Odzyskane pliki są zliczane w konsoli:
 
 ```text
@@ -256,6 +260,16 @@ Zaległe pliki: odzyskano 2 z 5, czeka jeszcze 3.
 ```
 
 Do jednej wiadomości logger wraca najwyżej osiem razy i nie dłużej niż przez 14 dni - po tym czasie plik na pewno wygasł po stronie WhatsAppa i notatka zostaje na stałe. Notatki o plikach pominiętych świadomie (wyłączony typ, przekroczony `MAX_MEDIA_SIZE_MB`) do kolejki nie trafiają.
+
+## Odpowiedzi na wiadomości
+
+Wiadomość napisana jako odpowiedź na inną ma w panelu i w plikach HTML cytat nad treścią: nagłówek „Odpowiedź na", nadawcę cytowanej wiadomości i jej treść. W danych siedzi to w polu `quotedMsg` (`sender`, `body`), a w bazie w kolumnie `quoted`.
+
+Cytat jest czytany dwiema drogami. Najpierw publicznym `getQuotedMessage()` z biblioteki, bo ono od razu daje model razem z kontaktem. Wywołanie idzie jednak przez `serialize()` - tę samą drogę, która w tym wydaniu WhatsApp Weba kończy się zminifikowanym `r: r` i dla której lista czatów, historia i pliki są czytane wprost ze `Store`. Wyjątek był łapany po cichu, `quotedMsg` zostawało puste i po odpowiedzi nie było w archiwum żadnego śladu - w panelu widać było same luźne wiadomości.
+
+Drugą drogą jest więc odczyt wprost z kolekcji (`src/quoted.ts`): bez serializacji, po `quotedStanzaID` i `quotedParticipant`, z każdym polem osłoniętym osobno. Autora cytatu nazywa już strona Node - tym samym mechanizmem, który nadaje nazwy czatom, więc w cytacie stoi nazwa z książki adresowej, a nie cyfry `@lid`. Gdy cytowanej wiadomości nie ma już w pamięci strony, zostaje sam typ (`[zdjęcie]`, `[film]`) - to nadal więcej niż nic, bo widać, że wiadomość była odpowiedzią.
+
+Zapytania do przeglądarki nie kosztuje żadna zwykła wiadomość: zanim cokolwiek pytamy, sprawdzamy po stronie Node, czy w surowych danych w ogóle jest ślad odpowiedzi.
 
 ## Doręczenie i odczytanie własnych wiadomości
 
@@ -380,6 +394,7 @@ Pełny wzór z komentarzami znajduje się w `.env.example`. Pusta wartość ozna
 | `SAVE_PROFILE_PICS` | `true` | Zapisuje zdjęcia profilowe i historię zmian. |
 | `AVATAR_REFRESH_DAYS` | `30` | Odstęp między sprawdzaniem zdjęć profilowych. |
 | `SAVE_STATUSES` | `true` | Archiwizuje relacje. |
+| `SAVE_CHANNELS` | `false` | Archiwizuje kanały WhatsAppa (WhatsApp Channels). |
 | `SWEEP_CHECK_HOURS` | `6` | Odstęp między przeglądami relacji i awatarów. |
 | `RETENTION_ENABLED` | `true` | Włącza automatyczne usuwanie starych danych. |
 | `RETENTION_DAYS` | `180` | Wiek usuwanych wiadomości i mediów w dniach. |
@@ -388,6 +403,18 @@ Pełny wzór z komentarzami znajduje się w `.env.example`. Pusta wartość ozna
 Relacje są czytane wprost z kolekcji `Store.Status`. `getBroadcasts()` z biblioteki składa je z `status.serialize()`, a nowsze wydania WhatsApp Weba potrafią oddać relację bez listy wiadomości - przegląd nie miał wtedy czego dopisać. Publiczne API zostaje planem awaryjnym.
 
 Skasowanie relacji z archiwum znaczy „pobierz ją jeszcze raz". Gdy folderu albo `_state.json` już nie ma, logger zapomina ten czat i przy najbliższym przeglądzie zapisuje relację od nowa - o ile WhatsApp nadal ją pokazuje, bo relacja żyje dobę.
+
+#### Kanały
+
+Kanały (WhatsApp Channels) są domyślnie pomijane. Kanał to nadajnik, a nie rozmowa: subskrybent nic tam nie pisze, a nadawca potrafi wrzucić kilkadziesiąt filmów dziennie - po kilku subskrypcjach zajmowały one w archiwum więcej miejsca niż wszystkie prawdziwe rozmowy razem.
+
+Pomijanie obejmuje trzy drogi naraz: zapis na żywo, nadrabianie historii (kanały wypadają z listy czatów, zanim cokolwiek zostanie otwarte) i kolejkę ponowień mediów. Kanał poznajemy po domenie identyfikatora `@newsletter` - to jedyny ślad dostępny bez serializowania modelu czatu. O pierwszej pominiętej wiadomości z danego kanału logger mówi raz, a nie przy każdym wpisie:
+
+```
+Pomijam kanał 120363000000000000@newsletter - kanały nie trafiają do archiwum (włącz je ustawieniem SAVE_CHANNELS=true w .env).
+```
+
+Kanały zarchiwizowane wcześniej zostają na dysku nietknięte - wyłączenie dotyczy wyłącznie nowych zapisów. `SAVE_CHANNELS=true` przywraca poprzednie zachowanie.
 
 ### Panel, baza i integracje
 

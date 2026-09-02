@@ -165,6 +165,7 @@ const ICON_SPRITE = `
     <symbol id="i-poll" viewBox="0 0 20 20"><path d="M5 16V9.5M10 16V4M15 16v-4.5"/></symbol>
     <symbol id="i-trash" viewBox="0 0 20 20"><path d="M3.8 5.6h12.4M8 5.6V3.4h4v2.2M5.6 5.6 6.5 17h7l.9-11.4"/></symbol>
     <symbol id="i-forward" viewBox="0 0 20 20"><path d="M3 16c0-5.2 3.8-7.8 9.5-7.8M9 4.4l4.4 3.8L9 12"/></symbol>
+    <symbol id="i-reply" viewBox="0 0 20 20"><path d="M17 16c0-5.2-3.8-7.8-9.5-7.8M11 4.4 6.6 8.2 11 12"/></symbol>
     <symbol id="i-close" viewBox="0 0 20 20"><path d="M5 5l10 10M15 5 5 15"/></symbol>
     <symbol id="i-tick" viewBox="0 0 20 20"><path d="M2.5 10.6 6 14l7-8.6"/></symbol>
     <symbol id="i-ticks" viewBox="0 0 20 20"><path d="M1.5 10.6 4.6 13.7l6.4-7.9M8.2 10.9l2.3 2.3 6.7-8.2"/></symbol>
@@ -292,7 +293,10 @@ function renderPoll(msg: ArchivedMessage): string {
 
 function renderQuote(msg: ArchivedMessage): string {
     if (!msg.quotedMsg) return '';
+    // Nagłówek, a nie sam cytat: bez niego blok wygląda jak kolejny akapit
+    // wiadomości i nie widać, że ktoś na coś odpowiadał.
     return `<blockquote class="quote">
+        <p class="quote-head">${icon('reply')}Odpowiedź na</p>
         <p class="quote-who">${esc(msg.quotedMsg.sender)}</p>
         <p class="quote-body">${fmt(msg.quotedMsg.body)}</p>
     </blockquote>`;
@@ -765,6 +769,8 @@ a:hover{color:#68D9CB}
     padding:5px 10px;margin-bottom:6px;
 }
 .msg.own .quote{border-left-color:var(--n1)}
+.quote-head{display:flex;align-items:center;gap:4px;font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:var(--dim);margin-bottom:2px}
+.quote-head .icon{width:13px;height:13px}
 .quote-who{font-size:12.5px;font-weight:600;color:var(--sea)}
 .msg.own .quote-who{color:var(--n1)}
 .quote-body{font-size:12.5px;color:var(--dim);line-height:1.4}

@@ -45,8 +45,14 @@ export function Wiadomosc({ message, folder }: Props) {
                     </p>
                 )}
 
+                {/* Nagłówek, a nie sam cytat: bez niego blok wygląda jak kolejny
+                    akapit wiadomości i nie widać, że ktoś na coś odpowiadał. */}
                 {message.quotedMsg && (
                     <blockquote className="quote">
+                        <p className="quote-head">
+                            <MaterialIcon name="reply" />
+                            <span>Odpowiedź na</span>
+                        </p>
                         <p className="quote-who">{message.quotedMsg.sender}</p>
                         <p className="quote-body">{message.quotedMsg.body}</p>
                     </blockquote>

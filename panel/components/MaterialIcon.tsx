@@ -5,6 +5,7 @@ const FILES = {
     attachment: 'attach_file.svg',
     delete: 'delete.svg',
     forward: 'forward.svg',
+    reply: 'reply.svg',
     arrowBack: 'arrow_back.svg',
     arrowForward: 'arrow_forward.svg',
     done: 'done.svg',

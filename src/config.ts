@@ -44,6 +44,13 @@ export interface Config {
     saveStatuses: boolean;
     sweepCheckHours: number;
 
+    /**
+     * Czy archiwizować kanały WhatsAppa. Domyślnie nie: kanał to nadajnik,
+     * na którym subskrybent i tak nic nie pisze, a filmy z niego potrafią
+     * zająć więcej miejsca niż wszystkie prawdziwe rozmowy razem.
+     */
+    saveChannels: boolean;
+
     retentionEnabled: boolean;
     retentionDays: number;
     retentionCheckHours: number;
@@ -221,6 +228,7 @@ const KNOWN_KEYS = new Set([
     'AVATAR_REFRESH_DAYS',
     'SAVE_STATUSES',
     'SWEEP_CHECK_HOURS',
+    'SAVE_CHANNELS',
     'RETENTION_ENABLED',
     'RETENTION_DAYS',
     'RETENTION_CHECK_HOURS',
@@ -306,6 +314,8 @@ export function loadConfig(rootDir: string, env: Env = process.env): LoadResult 
 
         saveStatuses: readBool(env, 'SAVE_STATUSES', true, warnings),
         sweepCheckHours: readNumber(env, 'SWEEP_CHECK_HOURS', 6, warnings, { min: 0.25, max: 720 }),
+
+        saveChannels: readBool(env, 'SAVE_CHANNELS', false, warnings),
 
         retentionEnabled: readBool(env, 'RETENTION_ENABLED', true, warnings),
         retentionDays: readNumber(env, 'RETENTION_DAYS', 180, warnings, { min: 0, max: 36500 }),

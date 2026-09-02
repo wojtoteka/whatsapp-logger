@@ -43,6 +43,20 @@ const RETRIED_FAILURES_PER_CHAT = 5;
 const CHAT_WINDOW_MS = 30 * 60 * 1000;
 
 /**
+ * Wiadomość młodsza niż to okno dostaje komplet podejść niezależnie od tego,
+ * ile plików zawiodło wcześniej w tym czacie.
+ *
+ * Licznik porażek pilnuje, żeby stara historia nie dokładała po kilka sekund
+ * do każdej wiadomości - i to jest słuszne, bo tam pliki zwykle naprawdę już
+ * nie istnieją. Tyle że dotykał też zdjęć przychodzących na żywo: po pięciu
+ * straconych plikach z archiwum świeże zdjęcie miało jedno podejście bez
+ * przerwy, a WhatsApp Web w tym momencie dopiero zaczynał je ściągać. Stąd
+ * "większość zdjęć się zapisuje, ale nie wszystkie". Dla nowej wiadomości
+ * cierpliwość kosztuje ułamek sekundy i zwyczajnie się opłaca.
+ */
+const FRESH_MESSAGE_MS = 5 * 60 * 1000;
+
+/**
  * Ile czekamy w przeglądarce, aż WhatsApp Web skończy ściągać plik.
  *
  * downloadMedia() z biblioteki tylko rozpoczyna pobieranie i natychmiast
@@ -311,7 +325,8 @@ export class MediaDownloader {
         // biblioteki idzie pierwsze.
         const order = target.isStatus ? [viaStore, viaLibrary] : [viaLibrary, viaStore];
 
-        const waits = this.retriesLeft(target) > 0 ? RETRY_WAITS_MS : RETRY_WAITS_MS.slice(0, 1);
+        const patient = isFresh(message) || this.retriesLeft(target) > 0;
+        const waits = patient ? RETRY_WAITS_MS : RETRY_WAITS_MS.slice(0, 1);
 
         // Bez message.reload() w tej pętli - i to nie jest oszczędność, tylko
         // naprawa. reload() przepuszcza model przez getMessageModel(), czyli
@@ -386,6 +401,16 @@ export function isRecoverableMediaFailure(reason: string): boolean {
         reason.startsWith('błąd pobierania') ||
         reason.startsWith('błąd zapisu')
     );
+}
+
+/**
+ * Czy wiadomość dopiero co przyszła. WhatsApp podaje znacznik w sekundach;
+ * brak znacznika traktujemy jako "stara", bo nowa zawsze go ma.
+ */
+function isFresh(message: WaMessage): boolean {
+    const seconds = message.timestamp;
+    if (typeof seconds !== 'number' || !Number.isFinite(seconds)) return false;
+    return Date.now() - seconds * 1000 < FRESH_MESSAGE_MS;
 }
 
 /** Wiarygodny rozmiar z metadanych albo null, gdy WhatsApp go nie podał. */
@@ -542,6 +567,21 @@ export async function downloadMediaFromStore(
 
                 if (!msg) return fail('wiadomości nie ma już w pamięci przeglądarki');
 
+                /**
+                 * Opis pliku bywa w dwóch miejscach i to nie jest to samo miejsce.
+                 *
+                 * Model wiadomości wystawia directPath, mediaKey czy mimetype
+                 * jako własne pola, ale po ponownym wysłaniu przez telefon
+                 * ("REUPLOADING") i przy wiadomościach dociągniętych z historii
+                 * nowy komplet ląduje wyłącznie w msg.mediaData - a na modelu
+                 * zostaje puste miejsce po starym. Czytanie samego modelu
+                 * kończyło się wtedy notatką "WhatsApp nie ma już adresu ani
+                 * klucza do tego pliku", mimo że komplet leżał obok. Stąd oba
+                 * źródła, model pierwszy.
+                 */
+                const field = (name: string): any =>
+                    safe(() => msg[name], null) ?? safe(() => msg.mediaData?.[name], null);
+
                 const wait = (ms: number): Promise<void> =>
                     new Promise((resolve) => setTimeout(resolve, ms));
                 const stageNow = (): string => safe(() => String(msg?.mediaData?.mediaStage ?? ''), '');
@@ -584,10 +624,13 @@ export async function downloadMediaFromStore(
                 const found = (data: unknown): DownloadedMedia | null =>
                     typeof data === 'string' && data.length > 0
                         ? {
+                              // Bez mimetype rozszerzenie pliku na dysku spada
+                              // do ".bin" - a to też jest w mediaData, gdy na
+                              // samym modelu go już nie ma.
+                              mimetype: field('mimetype') ?? undefined,
+                              filename: field('filename') ?? undefined,
+                              filesize: field('size') ?? undefined,
                               data,
-                              mimetype: safe(() => msg.mimetype, undefined),
-                              filename: safe(() => msg.filename, undefined),
-                              filesize: safe(() => msg.size, undefined),
                           }
                         : null;
 
@@ -666,8 +709,8 @@ export async function downloadMediaFromStore(
                     return fail('przeglądarka nie udostępnia DownloadManagera', stage);
                 }
 
-                const directPath = safe(() => msg.directPath, null);
-                const mediaKey = safe(() => msg.mediaKey, null);
+                const directPath = field('directPath');
+                const mediaKey = field('mediaKey');
                 if (!directPath || !mediaKey) {
                     // Bez tych dwóch pól nie ma czego odszyfrować, a przeglądarka
                     // nie ma gotowego blobu - plik przepadł po stronie WhatsAppa.
@@ -682,11 +725,11 @@ export async function downloadMediaFromStore(
                 try {
                     decrypted = await download({
                         directPath,
-                        encFilehash: safe(() => msg.encFilehash, undefined),
-                        filehash: safe(() => msg.filehash, undefined),
+                        encFilehash: field('encFilehash') ?? undefined,
+                        filehash: field('filehash') ?? undefined,
                         mediaKey,
-                        mediaKeyTimestamp: safe(() => msg.mediaKeyTimestamp, undefined),
-                        type: safe(() => msg.type, undefined),
+                        mediaKeyTimestamp: field('mediaKeyTimestamp') ?? undefined,
+                        type: field('type') ?? undefined,
                         signal: new AbortController().signal,
                         downloadQpl: {
                             addAnnotations() {

@@ -13,6 +13,7 @@ import type { Config } from './config';
 import type { Database } from './db';
 import { toArchivePath as toDatabaseArchivePath, toMessageRow } from './db';
 import { AvatarStore } from './avatars';
+import { isChannelId, isChannelMessage } from './channels';
 import {
     batchDataName,
     batchFileName,
@@ -37,6 +38,8 @@ import { isRecoverableMediaFailure, MediaDownloader } from './media';
 import type { MediaResult } from './media';
 import { MediaRetryQueue } from './mediaRetry';
 import type { PendingMedia } from './mediaRetry';
+import { hasQuotedHint, readQuotedFromStore } from './quoted';
+import type { RawQuoted } from './quoted';
 import {
     bareId,
     isStatusChat,
@@ -259,6 +262,8 @@ export class Archive {
     private readonly aliases = new Map<string, string>();
     private readonly index = new Map<string, ChatIndexEntry>();
     private readonly indexFile: string;
+    /** Kanały, o których pominięciu już powiedzieliśmy - żeby nie powtarzać. */
+    private readonly reportedChannels = new Set<string>();
 
     private readonly identity: IdentityResolver;
     private readonly media: MediaDownloader;
@@ -327,6 +332,12 @@ export class Archive {
         try {
             if (IGNORED_TYPES.has(message.type)) return false;
 
+            // Kanał to nadajnik, nie rozmowa - patrz src/channels.ts.
+            if (!this.config.saveChannels && isChannelMessage(message)) {
+                this.noteSkippedChannel(message);
+                return false;
+            }
+
             // Podczas synchronizacji WhatsApp może zwrócić już tylko model
             // typu "revoked". Nie dokładamy go jako pustej wiadomości -
             // aktualizujemy wcześniej zapisany rekord.
@@ -364,6 +375,22 @@ export class Archive {
             });
             return false;
         }
+    }
+
+    /**
+     * Odzywa się raz na kanał, a nie raz na wiadomość. Kanał potrafi
+     * przysłać kilkadziesiąt wpisów w minutę i bez tego jego pomijanie
+     * zalałoby dziennik dokładniej niż samo archiwizowanie.
+     */
+    private noteSkippedChannel(message: WaMessage): void {
+        const id = chatIdOf(message) ?? 'kanał bez identyfikatora';
+        if (this.reportedChannels.has(id)) return;
+
+        this.reportedChannels.add(id);
+        log.info(
+            `Pomijam kanał ${id} - kanały nie trafiają do archiwum ` +
+                '(włącz je ustawieniem SAVE_CHANNELS=true w .env).',
+        );
     }
 
     /** Ustala klucz archiwum dla nowo widzianego czatu. */
@@ -968,6 +995,15 @@ export class Archive {
             // wtedy to spis archiwum jest jedynym śladem, że w ogóle istnieje.
             for (const id of this.archivedChatIds()) ids.add(id);
 
+            // Kanały odpadają zanim cokolwiek otworzymy. Inaczej nadrabianie
+            // ściągałoby ich historię razem z filmami, mimo że zapis na żywo
+            // je pomija - a to właśnie tam siedzi cały spam.
+            if (!this.config.saveChannels) {
+                for (const id of [...ids]) {
+                    if (isChannelId(id)) ids.delete(id);
+                }
+            }
+
             log.debug(
                 `Nadrabianie: ${raw?.length ?? 0} czatów ze strony, ` +
                     `${contacts?.length ?? 0} kontaktów, razem ${ids.size} do sprawdzenia.`,
@@ -994,6 +1030,8 @@ export class Archive {
 
         for (const chat of chats) {
             const chatId = chat.id?._serialized ?? null;
+            if (!this.config.saveChannels && isChannelId(chatId)) continue;
+
             const exists = chatId ? await this.hasExistingChatFolder(chatId) : false;
 
             if (!includeNewChats && (!chatId || !exists)) {
@@ -1172,8 +1210,38 @@ export class Archive {
         return (await this.findLegacyFolder(chatId, chatId)) !== null;
     }
 
+    /**
+     * Cytat, na który odpowiada ta wiadomość.
+     *
+     * Dwie drogi, bo jedna nie wystarcza. Publiczne getQuotedMessage() oddaje
+     * gotowy model razem z kontaktem, ale idzie przez serialize() - a to
+     * w tym wydaniu WhatsApp Weba jest ta sama droga, która kończy się
+     * zminifikowanym "r: r" (patrz src/quoted.ts). Wyjątek był łapany po
+     * cichu i odpowiedź znikała z archiwum bez śladu: w panelu zostawały
+     * same luźne wiadomości. Odczyt wprost z kolekcji nie ma się na czym
+     * wywrócić, tylko autora trzeba nazwać już tutaj.
+     */
     private async quotedInfo(message: WaMessage): Promise<QuotedInfo | null> {
-        if (!message.hasQuotedMsg) return null;
+        if (!hasQuotedHint(message)) return null;
+
+        const viaLibrary = await this.quotedViaLibrary(message);
+        if (viaLibrary) return viaLibrary;
+
+        const raw = await readQuotedFromStore(message);
+        if (!raw) return null;
+
+        return {
+            sender: await this.quotedSender(raw),
+            // Cytatu bez treści też nie zamiatamy: sama informacja, że to
+            // odpowiedź, jest w rozmowie warta więcej niż jej brak.
+            body: raw.body ?? (raw.type ? typeLabel(raw.type) : '[wiadomość]'),
+        };
+    }
+
+    /** Cytat przez publiczne API biblioteki. null, gdy ta droga zawiodła. */
+    private async quotedViaLibrary(message: WaMessage): Promise<QuotedInfo | null> {
+        if (message.hasQuotedMsg !== true) return null;
+
         try {
             const quoted = (await message.getQuotedMessage()) as WaMessage | null;
             if (!quoted) return null;
@@ -1191,9 +1259,27 @@ export class Archive {
                 }
             }
             return { sender, body: quoted.body || typeLabel(quoted.type) };
-        } catch {
+        } catch (err) {
+            // Świadomie bez log.quiet(): ta droga zawodzi dla każdej odpowiedzi
+            // w całym archiwum, a quiet() przepisuje przy tym cały plik błędów.
+            // Cytat i tak zaraz spróbujemy odczytać wprost z kolekcji.
+            log.debug(`Cytat przez bibliotekę nie wyszedł: ${describeError(err)}`);
             return null;
         }
+    }
+
+    /** Kto napisał cytowaną wiadomość - po samym identyfikatorze autora. */
+    private async quotedSender(raw: RawQuoted): Promise<string> {
+        if (raw.fromMe === true) return 'Ja';
+        if (!raw.author) return 'Nieznany';
+
+        // Cytat z własnej wiadomości bywa bez flagi fromMe - zostaje wtedy
+        // porównanie z identyfikatorem tej sesji.
+        const own = this.client.info?.wid?._serialized;
+        if (own && raw.author === own) return 'Ja';
+
+        const identity = await this.identity.resolve(null, raw.author);
+        return identity?.name ?? placeholderName(raw.author);
     }
 
     // ---------------------------------------------------------------------
@@ -1573,6 +1659,13 @@ export class Archive {
         const stats: MediaRetryStats = { tried: 0, recovered: 0, waiting: 0 };
 
         for (const entry of await this.mediaRetry.due(limit)) {
+            // Zaległości po kanale, który archiwizowaliśmy przed wyłączeniem
+            // kanałów. Nie ma po co ich ściągać - wypadają z kolejki.
+            if (!this.config.saveChannels && isChannelId(entry.chatId)) {
+                await this.mediaRetry.remove(entry.messageId);
+                continue;
+            }
+
             stats.tried++;
             let outcome: RetryOutcome = 'bez-pliku';
             try {
