@@ -33,6 +33,7 @@ export function testConfig(logsDir: string, overrides: Partial<Config> = {}): Co
         sweepCheckHours: 6,
 
         saveChannels: false,
+        saveAiChat: false,
 
         retentionEnabled: true,
         retentionDays: 180,

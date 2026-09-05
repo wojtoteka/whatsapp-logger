@@ -122,6 +122,33 @@ test('numer @lid pytamy tylko raz - wynik zostaje w pamięci', async () => {
     assert.equal(calls, 1);
 });
 
+test('mapowanie @lid zachowuje systemowe konto WhatsAppa do późniejszego odfiltrowania', async () => {
+    for (const phone of ['0', '0@c.us', '0@s.whatsapp.net']) {
+        const resolver = new IdentityResolver(
+            fakeClient({ lidToPhone: { '999@lid': phone }, contacts: {} }),
+        );
+
+        assert.equal(await resolver.phoneForLid('999@lid'), '0');
+        assert.equal(await resolver.phoneForLid('999@lid'), '0', 'także wynik z pamięci zachowuje 0');
+        const identity = await resolver.resolve(null, '999@lid');
+        assert.equal(identity?.id, '0@c.us');
+    }
+});
+
+test('kontakt zachowuje systemowe 0 z numeru lub identyfikatora, ale nie dowolny krótki numer', () => {
+    for (const systemId of ['0', '0@c.us', '0@s.whatsapp.net']) {
+        const byNumber = readContact({ number: systemId } as unknown as WaContact, '999@lid');
+        const byId = readContact({ id: { _serialized: systemId } } as unknown as WaContact, '999@lid');
+
+        assert.equal(byNumber.number, '0');
+        assert.equal(byId.number, '0');
+    }
+    for (const invalid of ['1', '00', '12345', '0@newsletter', '0@g.us']) {
+        const info = readContact({ number: invalid } as unknown as WaContact, '999@lid');
+        assert.equal(info.number, null, invalid);
+    }
+});
+
 test('cyfry z @lid nigdy nie zostają podane jako numer telefonu', () => {
     // WhatsApp wkłada w takie pola sam identyfikator, gdy numeru nie zna.
     const contact = {

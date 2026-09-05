@@ -27,6 +27,7 @@ test('bez pliku .env program dostaje komplet wartości domyślnych', async () =>
         assert.equal(config.backfillMessagesPerChat, 250);
         assert.equal(config.retentionDays, 180);
         assert.equal(config.saveProfilePics, true);
+        assert.equal(config.saveAiChat, false);
         assert.equal(config.logsDir, path.resolve(dir, './logs'));
         assert.equal(config.lockedChatPassword, '');
         assert.equal(config.tauEnabled, false);
@@ -61,6 +62,41 @@ test('?tau jest opcjonalne, normalizuje numer i nie pozwala przekroczyć 200 wia
         assert.equal(config.tauProviderNumber, '18002428478');
         assert.equal(config.tauMaxMessages, 200);
         assert.ok(warnings.some((warning) => warning.includes('TAU_MAX_MESSAGES')));
+    });
+});
+
+test('SAVE_AI_CHAT wymaga świadomego włączenia archiwizacji AI i jest znanym kluczem', async () => {
+    await withEnvFile('SAVE_AI_CHAT=true\n', async (dir) => {
+        const { config, warnings } = loadConfig(dir, { SAVE_AI_CHAT: 'true' });
+
+        assert.equal(config.saveAiChat, true);
+        assert.equal(config.tauEnabled, false);
+        assert.deepEqual(warnings, []);
+    });
+});
+
+test('wyłączenie archiwizacji AI nie wyłącza ?tau ani nie zależy od kanałów', async () => {
+    await withEnvFile('SAVE_AI_CHAT=false\nTAU_ENABLED=true\nSAVE_CHANNELS=true\n', async (dir) => {
+        const { config, warnings } = loadConfig(dir, {
+            SAVE_AI_CHAT: 'false',
+            TAU_ENABLED: 'true',
+            SAVE_CHANNELS: 'true',
+        });
+
+        assert.equal(config.saveAiChat, false);
+        assert.equal(config.tauEnabled, true);
+        assert.equal(config.saveChannels, true);
+        assert.deepEqual(warnings, []);
+    });
+});
+
+test('błędne SAVE_AI_CHAT zostawia archiwizację AI wyłączoną i zgłasza uwagę', async () => {
+    await withEnvFile('SAVE_AI_CHAT=może\n', async (dir) => {
+        const { config, warnings } = loadConfig(dir, { SAVE_AI_CHAT: 'może' });
+
+        assert.equal(config.saveAiChat, false);
+        assert.equal(warnings.length, 1);
+        assert.match(warnings[0]!, /SAVE_AI_CHAT/);
     });
 });
 

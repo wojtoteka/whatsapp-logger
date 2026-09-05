@@ -395,6 +395,7 @@ Pełny wzór z komentarzami znajduje się w `.env.example`. Pusta wartość ozna
 | `AVATAR_REFRESH_DAYS` | `30` | Odstęp między sprawdzaniem zdjęć profilowych. |
 | `SAVE_STATUSES` | `true` | Archiwizuje relacje. |
 | `SAVE_CHANNELS` | `false` | Archiwizuje kanały WhatsAppa (WhatsApp Channels). |
+| `SAVE_AI_CHAT` | `false` | Archiwizuje rozmowę z ChatGPT pod numerem +1 (800) 242-8478. Nie wyłącza `?tau`. |
 | `SWEEP_CHECK_HOURS` | `6` | Odstęp między przeglądami relacji i awatarów. |
 | `RETENTION_ENABLED` | `true` | Włącza automatyczne usuwanie starych danych. |
 | `RETENTION_DAYS` | `180` | Wiek usuwanych wiadomości i mediów w dniach. |
@@ -415,6 +416,14 @@ Pomijam kanał 120363000000000000@newsletter - kanały nie trafiają do archiwum
 ```
 
 Kanały zarchiwizowane wcześniej zostają na dysku nietknięte - wyłączenie dotyczy wyłącznie nowych zapisów. `SAVE_CHANNELS=true` przywraca poprzednie zachowanie.
+
+#### Oficjalne konto WhatsAppa i rozmowa z AI
+
+Oficjalne konto WhatsAppa z ogłoszeniami i wskazówkami jest zawsze pomijane. Dotyczy to także wpisów, które wcześniej pojawiały się jako `czat/0`. Nie ma przełącznika w `.env`, który pozwala je archiwizować, a `SAVE_CHANNELS=true` nie znosi tego wykluczenia.
+
+Rozmowa z ChatGPT pod numerem **+1 (800) 242-8478** jest domyślnie pomijana. Ustaw `SAVE_AI_CHAT=true` w `.env`, aby włączyć jej archiwizację. Pomijanie obejmuje nowe wiadomości, nadrabianie historii oraz ponowienia pobierania mediów. Wcześniej zapisane pliki pozostają w archiwum.
+
+`SAVE_AI_CHAT=false` nie wyłącza asystenta `?tau`: nadal może wysyłać zapytania i odbierać odpowiedzi providera. Działanie asystenta kontroluje osobne ustawienie `TAU_ENABLED`.
 
 ### Panel, baza i integracje
 

@@ -14,6 +14,7 @@ import type { Database } from './db';
 import { toArchivePath as toDatabaseArchivePath, toMessageRow } from './db';
 import { AvatarStore } from './avatars';
 import { isChannelId, isChannelMessage } from './channels';
+import { IgnoredChats } from './ignoredChats';
 import {
     batchDataName,
     batchFileName,
@@ -266,6 +267,7 @@ export class Archive {
     private readonly reportedChannels = new Set<string>();
 
     private readonly identity: IdentityResolver;
+    private readonly ignoredChats: IgnoredChats;
     private readonly media: MediaDownloader;
     private readonly avatars: AvatarStore;
     /** Pliki, których WhatsApp nie oddał za pierwszym razem. */
@@ -283,6 +285,7 @@ export class Archive {
         this.avatars = new AvatarStore(config, client);
         this.mediaRetry = new MediaRetryQueue(config.logsDir);
         this.loadIndex();
+        this.ignoredChats = new IgnoredChats(config, this.identity, this.index);
     }
 
     /** Folder archiwum - potrzebny modułowi kasującemu stare pliki. */
@@ -331,6 +334,7 @@ export class Archive {
     ): Promise<boolean> {
         try {
             if (IGNORED_TYPES.has(message.type)) return false;
+            if (await this.ignoredChats.hasMessage(message, options.forceStatus)) return false;
 
             // Kanał to nadajnik, nie rozmowa - patrz src/channels.ts.
             if (!this.config.saveChannels && isChannelMessage(message)) {
@@ -410,6 +414,7 @@ export class Archive {
 
         const identity = await this.identity.resolve(message, rawId);
         const baseId = identity?.id ?? rawId;
+        if (this.ignoredChats.isKnown(baseId)) return null;
         const chatId = isStatus ? statusChatId(baseId) : baseId;
 
         if (!this.states.has(chatId)) {
@@ -1028,9 +1033,19 @@ export class Archive {
             return result;
         }
 
+        // Najpierw rozpoznajemy wszystkie aliasy. Późniejszy LID może
+        // ujawnić numer wykluczający też wcześniejszy czat z tego folderu.
+        const allowedChats: BackfillChat[] = [];
         for (const chat of chats) {
             const chatId = chat.id?._serialized ?? null;
-            if (!this.config.saveChannels && isChannelId(chatId)) continue;
+            if ((!this.config.saveChannels && isChannelId(chatId)) ||
+                await this.ignoredChats.has(chatId)) continue;
+            allowedChats.push(chat);
+        }
+
+        for (const chat of allowedChats) {
+            const chatId = chat.id?._serialized ?? null;
+            if (this.ignoredChats.isKnown(chatId)) continue;
 
             const exists = chatId ? await this.hasExistingChatFolder(chatId) : false;
 
@@ -1063,6 +1078,8 @@ export class Archive {
         // raz, ale zapamiętujemy komplet jej identyfikatorów.
         const groups = new Map<string, string[]>();
         for (const chatId of new Set(ids)) {
+            if ((!this.config.saveChannels && isChannelId(chatId)) ||
+                await this.ignoredChats.has(chatId)) continue;
             // Czat bez folderu jest sam dla siebie. Dwukropek jest w nazwie
             // folderu znakiem zakazanym (util.ts), więc taki klucz nie
             // sklei się z żadnym prawdziwym wpisem ze spisu archiwum.
@@ -1074,6 +1091,8 @@ export class Archive {
 
         const selected: BackfillTarget[] = [];
         for (const candidates of groups.values()) {
+            // Numer rozpoznany przy późniejszym aliasie wyklucza cały folder.
+            if (candidates.some((id) => this.ignoredChats.isKnown(id))) continue;
             const ranked = [...candidates].sort(readableIdsFirst(summaries));
             const primary = ranked[0];
             if (!primary) continue;
@@ -1190,7 +1209,9 @@ export class Archive {
 
     /** Czaty ze spisu archiwum. Relacje mają własny przegląd i tu nie należą. */
     private archivedChatIds(): string[] {
-        return [...this.index.keys()].filter((id) => id.includes('@') && !isStatusChat(id));
+        return [...this.index.keys()].filter((id) =>
+            id.includes('@') && !isStatusChat(id) && !this.ignoredChats.isKnown(id),
+        );
     }
 
     /**
@@ -1659,9 +1680,9 @@ export class Archive {
         const stats: MediaRetryStats = { tried: 0, recovered: 0, waiting: 0 };
 
         for (const entry of await this.mediaRetry.due(limit)) {
-            // Zaległości po kanale, który archiwizowaliśmy przed wyłączeniem
-            // kanałów. Nie ma po co ich ściągać - wypadają z kolejki.
-            if (!this.config.saveChannels && isChannelId(entry.chatId)) {
+            // Zaległości po pomijanych czatach nie uruchamiają pobierania.
+            if ((!this.config.saveChannels && isChannelId(entry.chatId)) ||
+                await this.ignoredChats.has(entry.chatId)) {
                 await this.mediaRetry.remove(entry.messageId);
                 continue;
             }
@@ -1702,6 +1723,7 @@ export class Archive {
 
         const isStatus = isStatusChat(entry.chatId);
         const message = await this.findForRetry(entry.messageId, isStatus);
+        if (await this.ignoredChats.hasMessage(message, isStatus)) return 'bez-miejsca';
         if (!message?.hasMedia) return 'bez-pliku';
 
         const media = await this.media.download(
@@ -1861,6 +1883,7 @@ export class Archive {
      * pliku HTML - dopisujemy notkę wprost w nim.
      */
     async markDeleted(message: WaMessage | null): Promise<boolean> {
+        if (await this.ignoredChats.hasMessage(message)) return false;
         const msgId = messageKey(message);
         if (!msgId) return false;
         const detectedAt = new Date().toISOString();
@@ -1981,6 +2004,7 @@ export class Archive {
      */
     async markAck(message: WaMessage | null, ack: number | null): Promise<boolean> {
         if (!message?.fromMe || ack === null) return false;
+        if (await this.ignoredChats.hasMessage(message)) return false;
 
         const msgId = messageKey(message);
         if (!msgId) return false;
@@ -2181,14 +2205,17 @@ export class Archive {
 
         for (const [key, entry] of this.index) {
             const id = bareId(key);
-            if (!id || id === 'me') continue;
+            if (!id || id === 'me' || this.ignoredChats.isKnown(key)) continue;
 
             const current = perFolder.get(entry.safeName);
             if (!current || (current.endsWith('@lid') && !id.endsWith('@lid'))) {
                 perFolder.set(entry.safeName, id);
             }
         }
-        const stats = await this.avatars.refreshAll(perFolder.values());
+        const stats = await this.avatars.refreshAll(
+            perFolder.values(),
+            (id) => this.ignoredChats.has(id),
+        );
 
         // Nowa wersja ma od razu trafić na listę rozmów, także gdy w czacie
         // nie przyszła właśnie żadna wiadomość.
@@ -2402,6 +2429,7 @@ export class Archive {
      */
     refreshAfterSync(): void {
         this.identity.refreshAfterSync();
+        this.ignoredChats.refreshAfterSync();
         for (const state of this.states.values()) state.nameRetryAt = 0;
     }
 }

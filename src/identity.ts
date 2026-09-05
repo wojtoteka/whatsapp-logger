@@ -26,7 +26,7 @@ interface ContactInfo {
     saved: string | null;
     /** Nazwa profilu, którą rozmówca ustawił sobie sam. */
     nick: string | null;
-    /** Numer telefonu, same cyfry. */
+    /** Numer telefonu, same cyfry; 0 oznacza systemowe konto WhatsAppa. */
     number: string | null;
 }
 
@@ -70,7 +70,7 @@ export class IdentityResolver {
         // przeglądarki i tylko zaśmieca plik z błędami.
         let saved = isLid ? null : await this.chatNameOf(message, rawId);
 
-        const phone = isLid ? await this.phoneForLid(rawId) : phoneDigits(rawId);
+        const phone = isLid ? await this.phoneForLid(rawId) : phoneOrSystemId(rawId);
         const id = phone ? `${phone}@c.us` : rawId;
 
         // Pytamy o kontakt pod każdym identyfikatorem, jaki mamy: przy @lid
@@ -102,7 +102,7 @@ export class IdentityResolver {
 
         try {
             const pairs = await this.client.getContactLidAndPhone([lid]);
-            const phone = phoneDigits(pairs?.[0]?.pn);
+            const phone = phoneOrSystemId(pairs?.[0]?.pn);
             if (phone) {
                 this.lidToPhone.set(lid, phone);
                 return phone;
@@ -207,7 +207,7 @@ export function readContact(contact: WaContact, queriedId: string): ContactInfo 
 
     let number: string | null = null;
     for (const candidate of candidates) {
-        const digits = phoneDigits(candidate);
+        const digits = phoneOrSystemId(candidate);
         if (digits && digits !== lidUser) {
             number = digits;
             break;
@@ -314,6 +314,15 @@ function serializedOf(value: unknown): string | null {
         return typeof inner === 'string' && inner.length > 0 ? inner : null;
     }
     return null;
+}
+
+/** Zachowuje systemowe konto 0, żeby filtr archiwizacji mógł je rozpoznać. */
+function phoneOrSystemId(value: unknown): string | null {
+    const serialized = serializedOf(value);
+    if (serialized === '0' || serialized === '0@c.us' || serialized === '0@s.whatsapp.net') {
+        return '0';
+    }
+    return phoneDigits(value);
 }
 
 /** Nazwa nadawcy do wyświetlenia przy wiadomości. */

@@ -950,6 +950,7 @@ function printConfig(config: Config, envFileFound: boolean): void {
     log.info(`  Limit pliku              ${config.maxMediaSizeMb} MB`);
     log.info(`  Zdjęcia profilowe        ${config.saveProfilePics ? `tak, odświeżanie co ${config.avatarRefreshDays} dni` : 'nie'}`);
     log.info(`  Relacje                  ${config.saveStatuses ? `tak, przegląd co ${formatHours(config.sweepCheckHours)}` : 'nie'}`);
+    log.info(`  Archiwizacja czatu AI    ${config.saveAiChat ? 'tak' : 'nie (SAVE_AI_CHAT=false, bez wpływu na ?tau)'}`);
     log.info(
         `  Kasowanie starych        ${
             config.retentionEnabled && config.retentionDays > 0

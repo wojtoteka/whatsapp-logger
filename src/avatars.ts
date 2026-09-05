@@ -83,7 +83,10 @@ export class AvatarStore {
      * dokładamy nową wersję. Termin liczymy z daty zapisanej na dysku,
      * więc po dłuższym postoju maszyny zaległe nadrabiamy od razu.
      */
-    async refreshAll(candidateIds: Iterable<string>): Promise<RefreshStats> {
+    async refreshAll(
+        candidateIds: Iterable<string>,
+        shouldSkip?: (id: string) => Promise<boolean>,
+    ): Promise<RefreshStats> {
         const stats: RefreshStats = { checked: 0, changed: 0 };
         if (!this.config.saveProfilePics) return stats;
 
@@ -94,10 +97,12 @@ export class AvatarStore {
                 const value = checkedAt(this.history.get(id));
                 return value === 0 || value <= deadline;
             })
-            .sort((a, b) => checkedAt(this.history.get(a)) - checkedAt(this.history.get(b)))
-            .slice(0, MAX_REFRESH_PER_SWEEP);
+            .sort((a, b) => checkedAt(this.history.get(a)) - checkedAt(this.history.get(b)));
 
         for (const id of targets) {
+            if (stats.checked >= MAX_REFRESH_PER_SWEEP) break;
+            // Historia zdjęć zawiera też kontakty spoza bieżącej listy czatów.
+            if (await shouldSkip?.(id)) continue;
             const record = this.history.get(id);
             if (record?.checkedAt && Date.parse(record.checkedAt) > deadline) continue;
 

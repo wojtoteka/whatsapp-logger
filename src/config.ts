@@ -51,6 +51,9 @@ export interface Config {
      */
     saveChannels: boolean;
 
+    /** Archiwizowanie rozmowy z ChatGPT (+1 800 242 8478). Nie wyłącza ?tau. */
+    saveAiChat: boolean;
+
     retentionEnabled: boolean;
     retentionDays: number;
     retentionCheckHours: number;
@@ -229,6 +232,7 @@ const KNOWN_KEYS = new Set([
     'SAVE_STATUSES',
     'SWEEP_CHECK_HOURS',
     'SAVE_CHANNELS',
+    'SAVE_AI_CHAT',
     'RETENTION_ENABLED',
     'RETENTION_DAYS',
     'RETENTION_CHECK_HOURS',
@@ -316,6 +320,7 @@ export function loadConfig(rootDir: string, env: Env = process.env): LoadResult 
         sweepCheckHours: readNumber(env, 'SWEEP_CHECK_HOURS', 6, warnings, { min: 0.25, max: 720 }),
 
         saveChannels: readBool(env, 'SAVE_CHANNELS', false, warnings),
+        saveAiChat: readBool(env, 'SAVE_AI_CHAT', false, warnings),
 
         retentionEnabled: readBool(env, 'RETENTION_ENABLED', true, warnings),
         retentionDays: readNumber(env, 'RETENTION_DAYS', 180, warnings, { min: 0, max: 36500 }),
