@@ -5,7 +5,7 @@ import path from 'node:path';
 import { Archive } from '../src/archive';
 import type { Database } from '../src/db';
 import { IdentityResolver } from '../src/identity';
-import { IgnoredChats, isIgnoredChatId } from '../src/ignoredChats';
+import { IgnoredChats, isIgnoredChatId, isSelfChatId } from '../src/ignoredChats';
 import { log } from '../src/log';
 import { MediaRetryQueue } from '../src/mediaRetry';
 import type { AvatarRecord, ChatIndexEntry, WaClient, WaMessage } from '../src/types';
@@ -17,6 +17,9 @@ const OFFICIAL_IDS = ['0@c.us', '0@s.whatsapp.net'];
 const AI_IDS = ['18002428478@c.us', '18002428478@s.whatsapp.net'];
 const IGNORED_IDS = [...OFFICIAL_IDS, ...AI_IDS];
 const CONTACT = '48123456789@c.us';
+/** Numer konta, na którym niby działa sesja - czat z nim to "wiadomości do siebie". */
+const OWN = '48500600700@c.us';
+const OWN_PHONE = '48500600700';
 
 /** Porównujemy również listę plików, żeby wykryć np. dopisanie _deleted.log. */
 async function snapshot(dir: string): Promise<Record<string, string>> {
@@ -354,5 +357,86 @@ test('odświeżanie awatarów pomija indeks i samą historię, także po rozpozn
         assert.deepEqual(requested, [CONTACT]);
         const refreshed = JSON.parse(await fs.readFile(historyFile, 'utf8')) as Record<string, AvatarRecord>;
         for (const [id, record] of Object.entries(history)) assert.deepEqual(refreshed[id], record, id);
+    });
+});
+
+// ---------------------------------------------------------------------
+//  Czat z samym sobą (SAVE_SELF_CHAT)
+// ---------------------------------------------------------------------
+
+test('czat z samym sobą poznajemy po własnym numerze, a nie po domenie identyfikatora', () => {
+    for (const id of [OWN, `${OWN_PHONE}@s.whatsapp.net`, `${OWN_PHONE}:12@c.us`]) {
+        assert.equal(isSelfChatId(id, OWN_PHONE), true, id);
+    }
+    for (const id of [CONTACT, `${OWN_PHONE}@g.us`, `${OWN_PHONE}@lid`, `${OWN_PHONE}@newsletter`, '']) {
+        assert.equal(isSelfChatId(id, OWN_PHONE), false, id);
+    }
+    // Bez zalogowania własnego numeru nie znamy - wtedy nic nie odpada.
+    assert.equal(isSelfChatId(OWN, null), false);
+});
+
+test('domyślnie wiadomości do siebie trafiają do archiwum', async () => {
+    await withTempDir(async (dir) => {
+        const archive = new Archive(testConfig(dir), fakeClient({ ownId: OWN }));
+        assert.equal(await archive.save(fakeMessage({
+            id: 'do-siebie', from: OWN, to: OWN, fromMe: true, body: 'Notatka dla siebie',
+        })), true);
+        assert.ok((await fs.readdir(dir)).includes('_czaty.json'));
+    });
+});
+
+test('SAVE_SELF_CHAT=false pomija czat z sobą samym, zanim ruszy pobieranie mediów', async () => {
+    await withTempDir(async (dir) => {
+        let downloads = 0;
+        const archive = new Archive(
+            testConfig(dir, { saveSelfChat: false }),
+            fakeClient({ ownId: OWN }),
+        );
+        for (const id of [OWN, `${OWN_PHONE}@s.whatsapp.net`]) {
+            const message = fakeMessage({
+                id: `do-siebie-${id}`, from: id, to: id, fromMe: true,
+                body: 'Nie archiwizuj', hasMedia: true, type: 'image',
+            });
+            message.downloadMedia = async () => {
+                downloads++;
+                throw new Error('pominięta wiadomość nie powinna pobierać mediów');
+            };
+            assert.equal(await archive.save(message), false, id);
+        }
+        assert.equal(downloads, 0);
+        assert.deepEqual(await fs.readdir(dir), [], 'pominięty czat nie tworzy żadnego archiwum');
+    });
+});
+
+test('SAVE_SELF_CHAT=false obejmuje też własny numer widziany jako @lid', async () => {
+    await withTempDir(async (dir) => {
+        const lid = '997766@lid';
+        const client = fakeClient({ ownId: OWN, lidToPhone: { [lid]: OWN } });
+        const archive = new Archive(testConfig(dir, { saveSelfChat: false }), client);
+        assert.equal(await archive.save(fakeMessage({
+            id: 'lid-do-siebie', from: lid, to: lid, fromMe: true, body: 'Notatka',
+        })), false);
+        assert.deepEqual(await fs.readdir(dir), []);
+    });
+});
+
+test('SAVE_SELF_CHAT=false nie rusza własnych wiadomości w cudzych czatach i grupach', async () => {
+    await withTempDir(async (dir) => {
+        const archive = new Archive(
+            testConfig(dir, { saveSelfChat: false }),
+            fakeClient({ ownId: OWN }),
+        );
+        // Wysłana wiadomość ma w polu "from" nasz własny numer, a rozmowę
+        // wskazuje dopiero "to" i id.remote - tak jak robi to whatsapp-web.js.
+        const mine = fakeMessage({ id: 'moja-do-kogos', from: OWN, to: CONTACT, fromMe: true, body: 'Cześć' });
+        (mine as unknown as { id: { remote: string } }).id.remote = CONTACT;
+
+        const group = fakeMessage({
+            id: 'moja-na-grupie', from: '120363000000000000@g.us', author: OWN,
+            to: '120363000000000000@g.us', fromMe: true, chatName: 'Grupa', body: 'Na grupie',
+        });
+
+        const messages = [mine, fakeMessage({ id: 'do-mnie', from: CONTACT, to: OWN, body: 'Hej' }), group];
+        for (const message of messages) assert.equal(await archive.save(message), true, String(message.body));
     });
 });

@@ -34,6 +34,7 @@ export function testConfig(logsDir: string, overrides: Partial<Config> = {}): Co
 
         saveChannels: false,
         saveAiChat: false,
+        saveSelfChat: true,
 
         retentionEnabled: true,
         retentionDays: 180,
@@ -96,11 +97,14 @@ export interface FakeClientOptions {
     broadcasts?: Array<{ msgs: WaMessage[] }>;
     /** Adresy zdjęć profilowych, po identyfikatorze. */
     profilePics?: Record<string, string>;
+    /** Identyfikator konta, na którym niby działa sesja - client.info.wid. */
+    ownId?: string;
 }
 
 /** Minimalny klient WhatsAppa - tyle, ile potrzebują testowane moduły. */
 export function fakeClient(options: FakeClientOptions = {}): WaClient {
     const client = {
+        ...(options.ownId ? { info: { wid: { _serialized: options.ownId } } } : {}),
         async getContactById(id: string) {
             const contact = options.contacts?.[id];
             if (!contact) throw new Error(`brak kontaktu ${id}`);

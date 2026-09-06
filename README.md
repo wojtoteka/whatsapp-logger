@@ -396,6 +396,7 @@ Pełny wzór z komentarzami znajduje się w `.env.example`. Pusta wartość ozna
 | `SAVE_STATUSES` | `true` | Archiwizuje relacje. |
 | `SAVE_CHANNELS` | `false` | Archiwizuje kanały WhatsAppa (WhatsApp Channels). |
 | `SAVE_AI_CHAT` | `false` | Archiwizuje rozmowę z ChatGPT pod numerem +1 (800) 242-8478. Nie wyłącza `?tau`. |
+| `SAVE_SELF_CHAT` | `true` | Archiwizuje czat z samym sobą - ten podpisany przez WhatsAppa „(Ty)". |
 | `SWEEP_CHECK_HOURS` | `6` | Odstęp między przeglądami relacji i awatarów. |
 | `RETENTION_ENABLED` | `true` | Włącza automatyczne usuwanie starych danych. |
 | `RETENTION_DAYS` | `180` | Wiek usuwanych wiadomości i mediów w dniach. |
@@ -424,6 +425,14 @@ Oficjalne konto WhatsAppa z ogłoszeniami i wskazówkami jest zawsze pomijane. D
 Rozmowa z ChatGPT pod numerem **+1 (800) 242-8478** jest domyślnie pomijana. Ustaw `SAVE_AI_CHAT=true` w `.env`, aby włączyć jej archiwizację. Pomijanie obejmuje nowe wiadomości, nadrabianie historii oraz ponowienia pobierania mediów. Wcześniej zapisane pliki pozostają w archiwum.
 
 `SAVE_AI_CHAT=false` nie wyłącza asystenta `?tau`: nadal może wysyłać zapytania i odbierać odpowiedzi providera. Działanie asystenta kontroluje osobne ustawienie `TAU_ENABLED`.
+
+#### Wiadomości do siebie
+
+Czat z własnym numerem - ten, który WhatsApp podpisuje „(Ty)" - jest archiwizowany tak samo jak każda inna rozmowa. Ustaw `SAVE_SELF_CHAT=false` w `.env`, żeby go pomijać: notatki, linki i pliki wysyłane samemu sobie nie trafią wtedy do archiwum.
+
+Wykluczenie działa po numerze konta, na którym uruchomiona jest sesja, więc obejmuje też ten sam czat widziany pod identyfikatorem `@lid`. Pomijane są nowe wiadomości, nadrabianie historii, ponowienia pobierania mediów i odświeżanie zdjęcia profilowego. Wcześniej zapisane pliki pozostają w archiwum - tak samo jak przy `SAVE_CHANNELS`.
+
+Ustawienie nie dotyczy własnych relacji ani własnych wiadomości w cudzych czatach i grupach: te zapisują się niezależnie od niego.
 
 ### Panel, baza i integracje
 

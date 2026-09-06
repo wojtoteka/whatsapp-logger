@@ -122,6 +122,19 @@ export function createLanGuard(options: LanGuardOptions): http.Server {
                 headers,
             },
             (upstream) => {
+                // Panel potrafi zerwać połączenie w połowie odpowiedzi: Next.js
+                // przerywa strumieniowanie strony, gdy przeglądarka odchodzi,
+                // a przy zamykaniu panelu gniazdo znika w pół zdania. Błąd
+                // wychodzi wtedy na strumieniu odpowiedzi, a nie na żądaniu,
+                // i pipe() go nie przenosi - bez tego nasłuchu nasza własna
+                // odpowiedź nigdy się nie kończy, a przeglądarka kręci się
+                // w kółko aż do swojego limitu czasu.
+                upstream.on('error', () => {
+                    proxied.destroy();
+                    // Nagłówki już poszły, więc uciętej odpowiedzi nie da się
+                    // niczym naprawić - przeglądarka ma zobaczyć, że jest ucięta.
+                    response.destroy();
+                });
                 response.writeHead(upstream.statusCode ?? 502, upstream.headers);
                 upstream.pipe(response);
             },

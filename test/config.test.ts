@@ -28,6 +28,7 @@ test('bez pliku .env program dostaje komplet wartości domyślnych', async () =>
         assert.equal(config.retentionDays, 180);
         assert.equal(config.saveProfilePics, true);
         assert.equal(config.saveAiChat, false);
+        assert.equal(config.saveSelfChat, true);
         assert.equal(config.logsDir, path.resolve(dir, './logs'));
         assert.equal(config.lockedChatPassword, '');
         assert.equal(config.tauEnabled, false);
@@ -97,6 +98,25 @@ test('błędne SAVE_AI_CHAT zostawia archiwizację AI wyłączoną i zgłasza uw
         assert.equal(config.saveAiChat, false);
         assert.equal(warnings.length, 1);
         assert.match(warnings[0]!, /SAVE_AI_CHAT/);
+    });
+});
+
+test('SAVE_SELF_CHAT=false wyłącza zapis wiadomości do siebie i jest znanym kluczem', async () => {
+    await withEnvFile('SAVE_SELF_CHAT=false\n', async (dir) => {
+        const { config, warnings } = loadConfig(dir, { SAVE_SELF_CHAT: 'false' });
+
+        assert.equal(config.saveSelfChat, false);
+        assert.deepEqual(warnings, []);
+    });
+});
+
+test('błędne SAVE_SELF_CHAT zostawia zapis wiadomości do siebie włączony i zgłasza uwagę', async () => {
+    await withEnvFile('SAVE_SELF_CHAT=chyba\n', async (dir) => {
+        const { config, warnings } = loadConfig(dir, { SAVE_SELF_CHAT: 'chyba' });
+
+        assert.equal(config.saveSelfChat, true);
+        assert.equal(warnings.length, 1);
+        assert.match(warnings[0]!, /SAVE_SELF_CHAT/);
     });
 });
 

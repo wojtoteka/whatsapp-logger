@@ -738,8 +738,13 @@ a:hover {
     padding: 26px 0 4px;
     flex-wrap: wrap;
 }
-.pager a,
-.pager span {
+/* Znak ">" jest tu istotny. Napis w przycisku też jest elementem <span>,
+   tak samo jak ikona strzałki, więc bez niego oba dostawały własną ramkę
+   i własne marginesy wewnętrzne - przycisk robił się dwa razy grubszy -
+   a przy okazji kolor przycisku wyłączonego, czyli szary napis na morskim
+   tle po najechaniu, na którym nie dało się nic odczytać. */
+.pager > a,
+.pager > span {
     display: inline-flex;
     align-items: center;
     gap: 8px;
@@ -751,11 +756,11 @@ a:hover {
     color: var(--sea);
     transition: background 0.15s, color 0.15s;
 }
-.pager a:hover {
+.pager > a:hover {
     background: var(--sea);
     color: var(--deep);
 }
-.pager span {
+.pager > span {
     border-color: var(--edge-strong);
     color: var(--dim);
     cursor: default;

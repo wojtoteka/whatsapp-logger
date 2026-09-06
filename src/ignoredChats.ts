@@ -1,6 +1,7 @@
 // Oficjalny czat WhatsAppa (PSA) zawsze pomijamy. Rozmowę z numerem
-// ChatGPT można archiwizować przez SAVE_AI_CHAT=true. Nazwa kontaktu ani
-// autor wiadomości w grupie nie decydują o wykluczeniu całej rozmowy.
+// ChatGPT można archiwizować przez SAVE_AI_CHAT=true, a rozmowę z samym sobą
+// wyłączyć przez SAVE_SELF_CHAT=false. Nazwa kontaktu ani autor wiadomości
+// w grupie nie decydują o wykluczeniu całej rozmowy.
 
 import type { Config } from './config';
 import { chatIdOf, IdentityResolver, messageKey, NAME_RETRY_MS, readContact } from './identity';
@@ -14,6 +15,17 @@ export function isIgnoredChatId(id: string | null | undefined, saveAiChat = fals
     return match !== null && (match[1] === '0' || !saveAiChat);
 }
 
+/**
+ * Czat "wiadomości do siebie" - ten, który WhatsApp podpisuje "(Ty)".
+ * Rozmówcą jest tam własny numer, więc wystarczy porównać same cyfry.
+ * Grupy, kanały i relacje odpadają na domenie identyfikatora.
+ */
+export function isSelfChatId(id: string | null | undefined, ownPhone: string | null): boolean {
+    if (!id || !ownPhone) return false;
+    const match = /^(\d+)(?::\d+)?@(?:c\.us|s\.whatsapp\.net)$/.exec(bareId(id));
+    return match?.[1] === ownPhone;
+}
+
 export class IgnoredChats {
     private readonly ids = new Set<string>();
     private readonly folders = new Set<string>();
@@ -21,12 +33,16 @@ export class IgnoredChats {
     private readonly checking = new Map<string, Promise<boolean>>();
 
     constructor(
-        private readonly config: Pick<Config, 'saveAiChat'>,
+        private readonly config: Pick<Config, 'saveAiChat' | 'saveSelfChat'>,
         private readonly identity: IdentityResolver,
         private readonly index: ReadonlyMap<string, ChatIndexEntry>,
     ) {
         // Starsze archiwum może znać ten sam czat pod numerem i pod @lid.
         // Nie usuwamy jego danych, ale żaden alias nie może wznowić pobierania.
+        //
+        // Własnego numeru jeszcze tu nie ma: archiwum powstaje przed
+        // zalogowaniem do WhatsAppa. Czat z samym sobą rozpoznaje więc
+        // dopiero isKnown(), przy pierwszej jego wiadomości.
         for (const [id, entry] of index) {
             if (isIgnoredChatId(id, config.saveAiChat)) this.folders.add(entry.safeName);
         }
@@ -35,8 +51,19 @@ export class IgnoredChats {
     isKnown(id: string | null | undefined): boolean {
         if (!id) return false;
         const folder = this.index.get(id)?.safeName;
-        return isIgnoredChatId(id, this.config.saveAiChat) || this.ids.has(bareId(id)) ||
+        return this.isIgnoredId(id) || this.ids.has(bareId(id)) ||
             (folder !== undefined && this.folders.has(folder));
+    }
+
+    /** Wykluczenie widoczne po samym identyfikatorze, bez pytania przeglądarki. */
+    private isIgnoredId(id: string | null | undefined): boolean {
+        return isIgnoredChatId(id, this.config.saveAiChat) ||
+            isSelfChatId(id, this.config.saveSelfChat ? null : this.identity.ownPhone());
+    }
+
+    /** To samo wykluczenie, gdy z @lid udało się wyłuskać sam numer. */
+    private isIgnoredPhone(phone: string | null | undefined): boolean {
+        return this.isIgnoredId(phone ? `${phone}@c.us` : null);
     }
 
     async has(id: string | null | undefined, message?: WaMessage): Promise<boolean> {
@@ -73,17 +100,17 @@ export class IgnoredChats {
     private async checkLid(id: string, message?: WaMessage): Promise<boolean> {
         const baseId = bareId(id);
         const phone = await this.identity.phoneForLid(baseId);
-        let ignored = isIgnoredChatId(phone ? `${phone}@c.us` : null, this.config.saveAiChat);
+        let ignored = this.isIgnoredPhone(phone);
         if (!phone) {
             const info = await this.identity.contactInfo(baseId);
-            ignored = isIgnoredChatId(info?.number ? `${info.number}@c.us` : null, this.config.saveAiChat);
+            ignored = this.isIgnoredPhone(info?.number);
             // Przy niepełnym Store numer czasem ma dopiero kontakt wiadomości.
             // getContact() wiadomości wysłanej wskazuje nas, a nie odbiorcę.
             if (!ignored && message && !message.fromMe) {
                 try {
                     const contact = await message.getContact();
                     const number = contact ? readContact(contact, baseId).number : null;
-                    ignored = isIgnoredChatId(number ? `${number}@c.us` : null, this.config.saveAiChat);
+                    ignored = this.isIgnoredPhone(number);
                 } catch {
                     // Brak numeru nie jest dowodem, że należy pominąć rozmowę.
                 }

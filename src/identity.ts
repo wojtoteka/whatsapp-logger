@@ -91,6 +91,17 @@ export class IdentityResolver {
     }
 
     /**
+     * Numer telefonu konta, na którym działa ta sesja - same cyfry.
+     *
+     * Pytamy przy każdym wywołaniu, bo client.info pojawia się dopiero po
+     * zalogowaniu, a moduły powstają wcześniej. Zapamiętanie null-a przy
+     * starcie znaczyłoby, że własnego numeru nie poznamy już nigdy.
+     */
+    ownPhone(): string | null {
+        return phoneDigits(this.client.info?.wid);
+    }
+
+    /**
      * Numer telefonu spod identyfikatora @lid. Korzystamy z publicznego
      * getContactLidAndPhone() z whatsapp-web.js - to jedyna droga, która
      * działa, gdy WhatsApp przysyła już wyłącznie @lid.

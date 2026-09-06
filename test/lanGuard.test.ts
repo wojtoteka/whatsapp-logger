@@ -131,6 +131,49 @@ test('bramka zrywa połączenie bez odpowiedzi, gdy adres nie przechodzi kontrol
     }
 });
 
+test('zerwana w pół odpowiedź panelu nie przewraca bramki', async () => {
+    let calls = 0;
+    const panel = http.createServer((_request, response) => {
+        calls++;
+        if (calls > 1) {
+            response.writeHead(200, { 'Content-Type': 'text/plain' });
+            response.end('archiwum');
+            return;
+        }
+        // Pierwsze żądanie ginie w pół odpowiedzi - dokładnie to widzi bramka,
+        // gdy Next.js przerywa strumieniowanie strony albo panel się zamyka.
+        // Gniazdo zrywamy dopiero po chwili: nagłówki i początek treści mają
+        // dojść do bramki, inaczej sprawdzalibyśmy zwykłą awarię połączenia.
+        response.writeHead(200, { 'Content-Type': 'text/plain', 'Content-Length': '100' });
+        response.write('początek');
+        setTimeout(() => response.socket?.destroy(), 50);
+    });
+    await listen(panel);
+
+    const guard = createLanGuard({
+        host: '127.0.0.1',
+        port: await findFreePort(),
+        targetHost: '127.0.0.1',
+        targetPort: (panel.address() as AddressInfo).port,
+    });
+    await once(guard, 'listening');
+
+    try {
+        const port = (guard.address() as AddressInfo).port;
+
+        // Bez obsługi błędu na strumieniu odpowiedzi bramka nigdy nie kończy
+        // tej odpowiedzi i żądanie wisi aż do limitu czasu przeglądarki.
+        await assert.rejects(get(port));
+
+        const answer = await get(port);
+        assert.equal(answer.status, 200, 'bramka odpowiada dalej');
+        assert.equal(answer.body, 'archiwum');
+    } finally {
+        await close(guard);
+        await close(panel);
+    }
+});
+
 // -- Drobiazgi ------------------------------------------------------------
 
 function listen(server: http.Server): Promise<void> {
@@ -164,6 +207,8 @@ function get(
             response.setEncoding('utf8');
             response.on('data', (chunk: string) => (body += chunk));
             response.on('end', () => resolve({ status: response.statusCode ?? 0, body }));
+            // Ucięta odpowiedź zgłasza się właśnie tutaj, a nie na żądaniu.
+            response.on('error', reject);
         });
         request.on('error', reject);
     });

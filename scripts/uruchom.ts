@@ -20,6 +20,7 @@ import type { Config } from '../src/config';
 import { loadConfig } from '../src/config';
 import { createLanGuard, findFreePort } from '../src/lanGuard';
 import { killOrphanBrowsers, sessionProfileDir } from '../src/orphans';
+import { createPanelOutputFilter } from '../src/panelLog';
 import { decideLoggerRestart } from '../src/restart';
 
 const ROOT_DIR = path.resolve(__dirname, '..', '..');
@@ -220,8 +221,14 @@ function adresPanelu(host: string, port: number): string {
 function prefix(child: ChildProcess, label: string): void {
     for (const stream of [child.stdout, child.stderr]) {
         if (!stream) continue;
+        // Każdy strumień dostaje własny filtr: blok błędu ze standardowego
+        // wyjścia diagnostycznego nie może się pogubić przez linię, która
+        // w tej samej chwili wyszła zwykłym wyjściem.
+        const filter = createPanelOutputFilter();
         readline.createInterface({ input: stream }).on('line', (line) => {
-            if (line.trim().length > 0) console.log(`${label} ${line}`);
+            if (line.trim().length === 0) return;
+            const shown = filter(line);
+            if (shown !== null) console.log(`${label} ${shown}`);
         });
     }
 }
