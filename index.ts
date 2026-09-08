@@ -216,6 +216,8 @@ class Runtime {
     private incrementalRunning = false;
     private incrementalFailures = 0;
     private incrementalRetryAt = 0;
+    /** Odstęp, o którym już powiedzieliśmy - żeby nie powtarzać tej samej linii. */
+    private incrementalAnnouncedDelay = 0;
     private readyFallbackTimer: NodeJS.Timeout | null = null;
     /** Zegar pilnujący, czy launcher jeszcze żyje - patrz watchParent(). */
     private parentWatchTimer: NodeJS.Timeout | null = null;
@@ -478,10 +480,14 @@ class Runtime {
         const created = stats.newChats > 0 ? `, nowych rozmów ${stats.newChats}` : '';
         const updated = stats.updated > 0 ? `, zaktualizowanych ${stats.updated}` : '';
         const completeness = stats.complete ? '' : ', zakres niepełny';
+        const gaps =
+            stats.staleCheckpointChats > 0
+                ? `, luka w ${stats.staleCheckpointChats} czatach (--nadrob-wszystko)`
+                : '';
         log.info(
             `Nadrabianie wiadomości: dopisano ${stats.saved}, ` +
                 `już zapisanych ${stats.skipped}, przejrzano ${stats.scanned} ` +
-                `w ${stats.chats} czatach${created}${updated}${newChats}${failed}${completeness}.`,
+                `w ${stats.chats} czatach${created}${updated}${newChats}${failed}${gaps}${completeness}.`,
         );
         return stats;
     }
@@ -521,6 +527,7 @@ class Runtime {
             if (stats.complete) {
                 this.incrementalFailures = 0;
                 this.incrementalRetryAt = 0;
+                this.incrementalAnnouncedDelay = 0;
             } else {
                 this.scheduleIncrementalBackoff();
             }
@@ -537,6 +544,12 @@ class Runtime {
         const base = this.config.syncIntervalMinutes * 60 * 1000;
         const delay = Math.min(base * 2 ** this.incrementalFailures, 6 * 60 * 60 * 1000);
         this.incrementalRetryAt = Date.now() + delay;
+
+        // Przy awarii, która się nie kończy, odstęp dobija do sufitu i przestaje
+        // się zmieniać. Wtedy ta linia nie niesie już nic nowego, a wraca co
+        // sześć godzin - mówimy więc tylko o zmianie odstępu.
+        if (delay === this.incrementalAnnouncedDelay) return;
+        this.incrementalAnnouncedDelay = delay;
         log.warn(
             `Synchronizacja okresowa: kolejna próba najwcześniej za ${Math.ceil(delay / 60000)} min.`,
         );
@@ -567,6 +580,7 @@ class Runtime {
         this.pauseOperationalTimers();
         this.incrementalFailures = 0;
         this.incrementalRetryAt = 0;
+        this.incrementalAnnouncedDelay = 0;
 
         log.info('Sesja została wylogowana. Czekam na nowy kod QR w tym terminalu...');
         this.relinkPreparation = this.prepareForRelink(reason);

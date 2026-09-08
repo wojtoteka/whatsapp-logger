@@ -11,6 +11,8 @@ z wariantu `materialsymbolsoutlined` w rozmiarze 24 px:
 - `reply`
 - `arrow_back`
 - `arrow_forward`
+- `search`
+- `close`
 
 Dwa znaczniki doręczenia pochodzą z tego samego repozytorium, ale z klasycznego
 wariantu `material-icons` w rozmiarze 24 px:

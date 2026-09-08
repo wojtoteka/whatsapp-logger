@@ -16,6 +16,23 @@ function target(dir: string): MediaTarget {
     };
 }
 
+/** Zbiera to, co pobieranie wypisało na stderr - tam idą ostrzeżenia. */
+async function captureStderr(run: () => Promise<void>): Promise<{ err: string }> {
+    const captured = { err: '' };
+    const original = process.stderr.write.bind(process.stderr);
+    process.stderr.write = ((chunk: string) => {
+        captured.err += chunk;
+        return true;
+    }) as typeof process.stderr.write;
+
+    try {
+        await run();
+    } finally {
+        process.stderr.write = original;
+    }
+    return captured;
+}
+
 test('pusty wynik pobierania nie zamyka sprawy - próbujemy jeszcze raz', async () => {
     await withTempDir(async (dir) => {
         let calls = 0;
@@ -56,6 +73,46 @@ test('zminifikowany błąd biblioteki nie przykrywa powodu ze Store', async () =
             'nie udało się pobrać pliku: brak otwartej strony WhatsApp Web',
         );
         assert.ok(isRecoverableMediaFailure(result.skipped?.reason ?? ''), 'plik wraca do kolejki');
+    });
+});
+
+test('ten sam stracony plik nie melduje się przy każdym przeglądzie zaległości', async () => {
+    await withTempDir(async (dir) => {
+        // Zajęte miejsce na folder mediów - zapis pliku musi się wywrócić.
+        await fs.mkdir(path.join(dir, 'Albert'), { recursive: true });
+        await fs.writeFile(path.join(dir, 'Albert', 'media'), 'zajęte');
+
+        const stracony = fakeMessage({ id: 'stracony', type: 'image', hasMedia: true });
+        (stracony as { downloadMedia: () => Promise<unknown> }).downloadMedia = async () => ({
+            data: Buffer.from('plik').toString('base64'),
+            mimetype: 'image/jpeg',
+        });
+
+        // Inna wiadomość z innym powodem - to ona kończyła okno czasowe czatu
+        // i otwierała drogę do powtórzenia zdania o pliku, o którym już było.
+        const inny = fakeMessage({ id: 'inny', type: 'image', hasMedia: true });
+        (inny as { downloadMedia: () => Promise<unknown> }).downloadMedia = () => {
+            throw new Error('r: r');
+        };
+
+        const downloader = new MediaDownloader(testConfig(dir));
+        const { err } = await captureStderr(async () => {
+            await downloader.download(stracony, target(dir));
+            await downloader.download(inny, target(dir));
+            // Przegląd zaległości wraca do tej samej wiadomości co kilka godzin.
+            await downloader.download(stracony, target(dir));
+        });
+
+        const lines = err
+            .split(/\r?\n/)
+            .filter((line) => line.includes('Nie udało się pobrać mediów'));
+        assert.equal(lines.length, 2, 'każdy plik odzywa się raz, mimo powtórzonego podejścia');
+        // Jedna linia o pliku, którego nie da się zapisać, jedna o tym,
+        // którego WhatsApp nie odda - i ani jednej powtórki.
+        assert.equal(
+            lines.filter((line) => line.includes('brak otwartej strony WhatsApp Web')).length,
+            1,
+        );
     });
 });
 

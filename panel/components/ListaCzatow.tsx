@@ -1,15 +1,17 @@
-import Link from 'next/link';
 import { messageCount, relativeDay } from '@/lib/format';
 import type { ChatSummary } from '@/lib/typy';
-import { Awatar } from './Awatar';
+import { SzukajkaCzatow } from './SzukajkaCzatow';
+import type { KartaCzatu, TekstySzukania } from './SzukajkaCzatow';
 
 interface Props {
     chats: ChatSummary[];
+    /** Teksty wyszukiwarki - inne dla rozmów, inne dla relacji. */
+    search: TekstySzukania;
     /** Co pokazać, gdy nie ma jeszcze żadnego czatu. */
     empty: { title: string; hint: React.ReactNode };
 }
 
-export function ListaCzatow({ chats, empty }: Props) {
+export function ListaCzatow({ chats, search, empty }: Props) {
     if (chats.length === 0) {
         return (
             <div className="empty-state">
@@ -19,22 +21,17 @@ export function ListaCzatow({ chats, empty }: Props) {
         );
     }
 
-    return (
-        <div className="chat-grid">
-            {chats.map((chat) => (
-                <Link key={chat.folder} className="chat-card" href={`/czat/${chat.slug}`}>
-                    <Awatar path={chat.avatar} name={chat.name} size="md" />
+    // Daty i odmiany zamieniamy na gotowe napisy tutaj, bo filtrowanie listy
+    // dzieje się już w przeglądarce - patrz komentarz przy KartaCzatu.
+    const cards: KartaCzatu[] = chats.map((chat) => ({
+        folder: chat.folder,
+        slug: chat.slug,
+        name: chat.name,
+        avatar: chat.avatar,
+        preview: chat.preview,
+        when: relativeDay(chat.lastMessageAt),
+        meta: messageCount(chat.messageCount),
+    }));
 
-                    <div className="body">
-                        <div className="row">
-                            <span className="name">{chat.name}</span>
-                            <span className="when">{relativeDay(chat.lastMessageAt)}</span>
-                        </div>
-                        {chat.preview && <div className="preview">{chat.preview}</div>}
-                        <div className="meta">{messageCount(chat.messageCount)}</div>
-                    </div>
-                </Link>
-            ))}
-        </div>
-    );
+    return <SzukajkaCzatow chats={cards} search={search} />;
 }

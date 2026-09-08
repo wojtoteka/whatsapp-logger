@@ -171,6 +171,16 @@ export interface BackfillStats {
     newChats: number;
     /** Istniejące rekordy zmienione podczas synchronizacji, np. oznaczone jako usunięte. */
     updated: number;
+    /**
+     * Czaty, w których między archiwum a oknem strony została historia.
+     *
+     * Liczone dopiero po zapisie i wyłącznie na dowodach: najstarsza
+     * wiadomość okna musi być dla archiwum nowa. To nie jest awaria, tylko
+     * trwała luka: zamknie ją dopiero --nadrob-wszystko. Świadomie nie rusza `complete`, bo od tamtej flagi
+     * zależy wstrzymanie synchronizacji okresowej, a wstrzymywanie jej przez
+     * stan, który sam się nie zmieni, zatrzymywało też zapis nowych wiadomości.
+     */
+    staleCheckpointChats: number;
     /** Czy żądany zakres historii został pobrany w całości. */
     complete: boolean;
 }
@@ -339,6 +349,16 @@ export class Archive {
             // Kanał to nadajnik, nie rozmowa - patrz src/channels.ts.
             if (!this.config.saveChannels && isChannelMessage(message)) {
                 this.noteSkippedChannel(message);
+                return false;
+            }
+
+            // Album to samo opakowanie na zdjęcia wysłane jednym rzutem -
+            // każde z nich przychodzi zaraz potem osobną wiadomością, z własną
+            // treścią i własnym plikiem. Zapisany zostawiał w archiwum pozycję
+            // bez treści i bez pliku ("[album]" w dzienniku, "bez zapisanej
+            // treści" na stronie), a w rzadkim przypadku, gdy WhatsApp włoży do
+            // niego podpis albo plik, wpis zostaje jak każdy inny.
+            if (message.type === 'album' && !message.hasMedia && !message.body?.trim()) {
                 return false;
             }
 
@@ -586,6 +606,7 @@ export class Archive {
             failedChats: 0,
             newChats: 0,
             updated: 0,
+            staleCheckpointChats: 0,
             complete: true,
         };
         const fullHistory = options.fullHistory === true;
@@ -741,6 +762,7 @@ export class Archive {
                 let messages = (await chat.fetchMessages(requestedLimit)) as WaMessage[];
 
                 const checkpoint = fullHistory ? null : await this.checkpointFor(chatId);
+                let gapReport: string | null = null;
                 if (checkpoint && Number.isFinite(requestedLimit)) {
                     // Jeśli cała paczka jest nowsza od checkpointu, przerwa
                     // offline była większa niż zwykłe okno. Pogłębiamy je
@@ -762,15 +784,37 @@ export class Archive {
                         );
                         messages = (await chat.fetchMessages(requestedLimit)) as WaMessage[];
                     }
+                    // Pusta paczka nie mówi nic o zakresie. oldestTimestamp()
+                    // zwraca dla niej nieskończoność, więc każdy checkpoint
+                    // wyglądał na wypadnięty poza okno - a że bez wiadomości
+                    // nie ma też czego zapisać w nowym checkpoincie, czat,
+                    // którego WhatsApp Web nie trzyma już w pamięci, zgłaszał
+                    // tę samą lukę przy każdej synchronizacji do końca świata.
                     if (
+                        messages.length > 0 &&
                         !containsCheckpoint(messages, checkpoint) &&
                         oldestTimestamp(messages) > checkpoint.timestamp
                     ) {
-                        stats.complete = false;
-                        log.warn(
-                            `Nadrabianie ${chatName}: checkpoint jest starszy niż bezpieczne okno 50000 wiadomości. ` +
-                                'Zapisano dostępny nowszy zakres; uruchom --nadrob-wszystko dla pełnej kontroli.',
-                        );
+                        // Pętla wyżej kończy się na dwa sposoby i to są dwie
+                        // zupełnie różne wiadomości dla czytającego. Albo
+                        // pogłębianie dobiło do sufitu - wtedy zaległości są
+                        // faktycznie ogromne. Albo strona wyczerpała historię,
+                        // jaką ma pod ręką, i wtedy liczba jest kilkucyfrowa,
+                        // a zdanie o "oknie 50000 wiadomości" wprowadzało
+                        // w błąd tym mocniej, im mniej wiadomości WhatsApp
+                        // Web faktycznie oddał.
+                        const hitCeiling = requestedLimit >= 50_000;
+                        const what = hitCeiling
+                            ? 'od ostatniej synchronizacji przybyło ponad 50000 wiadomości, ' +
+                              'tyle na raz nie pobieramy'
+                            : `WhatsApp Web oddał tylko ${messages.length} najnowszych wiadomości ` +
+                              'i nie sięga nimi do ostatniej synchronizacji';
+
+                        // Zgłoszenie czeka na wynik zapisu - dopiero on
+                        // rozstrzyga, czy luka faktycznie jest. Patrz niżej.
+                        gapReport =
+                            `Nadrabianie ${chatName}: ${what}. Zapisano dostępny nowszy zakres; ` +
+                            'starszą historię dobierze "npm start -- --nadrob-wszystko".';
                     }
                 }
                 messages.sort((a, b) => a.timestamp - b.timestamp);
@@ -783,6 +827,10 @@ export class Archive {
                         ? await this.allMessageIds(chatId)
                         : null;
                 const newest = messages[messages.length - 1] ?? null;
+
+                // Czy najstarsza wiadomość z okna była dla archiwum nowa.
+                // Rozstrzyga zgłoszenie luki - uzasadnienie pod pętlą.
+                let oldestWasNew = false;
 
                 for (const [messageIndex, message] of messages.entries()) {
                     if (
@@ -803,7 +851,13 @@ export class Archive {
                     stats.scanned++;
                     if (message.type === 'revoked') {
                         if (await this.markDeleted(message)) stats.updated++;
-                        else stats.skipped++;
+                        else {
+                            // Nie ma czego oznaczyć - kasowanej wiadomości
+                            // archiwum nie zna, więc dla zakresu liczy się
+                            // tak samo jak każda inna nowa.
+                            stats.skipped++;
+                            if (messageIndex === 0) oldestWasNew = true;
+                        }
                         continue;
                     }
                     // Świadomie nie odcinamy tu niczego po czasie. Checkpoint
@@ -814,11 +868,31 @@ export class Archive {
                     // ostatnia zapisana - i taka luka nie zamykała się już nigdy.
                     if (await this.save(message, { ...(knownIds ? { knownIds } : {}) })) {
                         stats.saved++;
+                        if (messageIndex === 0) oldestWasNew = true;
                         const id = messageKey(message);
                         if (id) knownIds?.add(id);
                     } else {
                         stats.skipped++;
                     }
+                }
+
+                // Checkpoint przesuwa wyłącznie nadrabianie, więc wiadomości
+                // złapane na żywo zostawiają go w tyle. Samo to, że okno ich
+                // nie obejmuje, nie jest więc jeszcze dowodem na lukę, a przy
+                // czatach, dla których WhatsApp Web trzyma w pamięci tylko
+                // ostatnią wiadomość, oskarżało o lukę po każdej nowej
+                // wiadomości - i to zaraz obok "dopisano 0".
+                //
+                // Dowodem jest dopiero najstarsza wiadomość okna: skoro tę
+                // archiwum już miało, sięga co najmniej tak daleko wstecz jak
+                // strona i cały zwrócony zakres jest zamknięty. Nowa najstarsza
+                // znaczy, że między checkpointem a oknem leży historia, której
+                // WhatsApp Web już nie odda - i to jest luka.
+                if (gapReport && oldestWasNew) {
+                    // Luki nie zamknie ani ponowna próba, ani czekanie -
+                    // wyłącznie --nadrob-wszystko. Raz na uruchomienie.
+                    stats.staleCheckpointChats++;
+                    log.once(`stary-checkpoint:${chatId ?? chatName}`, gapReport);
                 }
 
                 if (newest) await this.commitCheckpoint(chatId, newest);

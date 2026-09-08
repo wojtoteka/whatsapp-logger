@@ -1,4 +1,4 @@
-import { fileUrl } from '@/lib/archiwum';
+import { fileUrl } from '@/lib/pliki';
 import { initial, senderTone } from '@/lib/format';
 
 interface Props {

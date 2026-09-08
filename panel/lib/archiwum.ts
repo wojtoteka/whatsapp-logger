@@ -54,13 +54,6 @@ export function fromSlug(slug: string): string {
     return decodeURIComponent(slug).split('__').join('/');
 }
 
-/** Adres, spod którego panel serwuje plik z archiwum. */
-export function fileUrl(archivePath: string | null): string | null {
-    if (!archivePath) return null;
-    const parts = archivePath.split('/').filter(Boolean).map(encodeURIComponent);
-    return `/api/plik/${parts.join('/')}`;
-}
-
 /**
  * Ścieżka pliku widziana od folderu archiwum. Na dysku zapisywana jest
  * względem folderu czatu ("media/x.jpg", "../_avatars/y.jpg"), bo tak

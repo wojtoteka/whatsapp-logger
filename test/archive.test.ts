@@ -254,6 +254,7 @@ test('nadrabianie przegląda poprzednie czaty i dopisuje tylko brakujące wiadom
             failedChats: 0,
             newChats: 0,
             updated: 0,
+            staleCheckpointChats: 0,
             complete: true,
         });
         assert.equal(syncCalls, 1);
@@ -269,6 +270,7 @@ test('nadrabianie przegląda poprzednie czaty i dopisuje tylko brakujące wiadom
             failedChats: 0,
             newChats: 0,
             updated: 0,
+            staleCheckpointChats: 0,
             complete: true,
         });
 
@@ -277,6 +279,97 @@ test('nadrabianie przegląda poprzednie czaty i dopisuje tylko brakujące wiadom
             state.pendingMessages.map((message) => message.body),
             ['już mam', 'do nadrobienia'],
         );
+    });
+});
+
+test('czat, którego strona nie trzyma już w pamięci, nie zgłasza luki w historii', async () => {
+    await withTempDir(async (dir) => {
+        const only = fakeMessage({ id: 'jedyna', from: '999@lid', body: 'cześć', timestamp: 100 });
+        let fetches = 0;
+        const client = fakeClient({ lidToPhone: { '999@lid': '5550100@c.us' } });
+        client.getChats = async () =>
+            [
+                {
+                    id: { _serialized: '999@lid' },
+                    // Pierwszy przebieg ustawia checkpoint, kolejne dostają
+                    // pustkę - dokładnie tak zachowuje się czat, który wypadł
+                    // z pamięci WhatsApp Weba.
+                    fetchMessages: async () => (fetches++ === 0 ? [only] : []),
+                },
+            ] as unknown as Awaited<ReturnType<typeof client.getChats>>;
+
+        const archive = new Archive(testConfig(dir, { messagesPerFile: 100 }), client);
+        await archive.save(only);
+        await archive.backfillRecent(25);
+
+        // Pusta paczka nie jest dowodem na to, że checkpoint wypadł poza okno.
+        // Wcześniej wychodziło z niej "zakres niepełny", a to wstrzymywało
+        // synchronizację okresową aż do sufitu sześciu godzin.
+        const stats = await archive.backfillRecent(25);
+        assert.equal(stats.staleCheckpointChats, 0);
+        assert.equal(stats.complete, true);
+    });
+});
+
+test('okno z jedną wiadomością, którą archiwum już ma, nie jest luką', async () => {
+    await withTempDir(async (dir) => {
+        const old = fakeMessage({ id: 'stara', from: '999@lid', body: 'stara', timestamp: 10 });
+        const fresh = fakeMessage({ id: 'nowa', from: '999@lid', body: 'nowa', timestamp: 20 });
+        let window: unknown[] = [old];
+        const client = fakeClient({ lidToPhone: { '999@lid': '5550100@c.us' } });
+        client.getChats = async () =>
+            [
+                {
+                    id: { _serialized: '999@lid' },
+                    fetchMessages: async () => window,
+                },
+            ] as unknown as Awaited<ReturnType<typeof client.getChats>>;
+
+        const archive = new Archive(testConfig(dir, { messagesPerFile: 100 }), client);
+        await archive.save(old);
+        assert.equal((await archive.backfillRecent(25)).staleCheckpointChats, 0);
+
+        // Nowa wiadomość przychodzi na żywo, więc archiwum ma ją komplet -
+        // ale checkpoint przesuwa wyłącznie nadrabianie i zostaje przy starej.
+        await archive.save(fresh);
+        // WhatsApp Web trzyma w pamięci już tylko tę jedną, najnowszą.
+        window = [fresh];
+
+        // Zakres, którego archiwum w całości już ma, nie jest dowodem na lukę.
+        // Wcześniej każda nowa wiadomość w takim czacie wywoływała alarm
+        // "starszą historię dobierze --nadrob-wszystko" - obok "dopisano 0".
+        const stats = await archive.backfillRecent(25);
+        assert.equal(stats.saved, 0);
+        assert.equal(stats.staleCheckpointChats, 0);
+    });
+});
+
+test('okno, które nie sięga archiwum, zgłasza lukę do nadrobienia', async () => {
+    await withTempDir(async (dir) => {
+        const old = fakeMessage({ id: 'stara', from: '999@lid', body: 'stara', timestamp: 10 });
+        const fresh = fakeMessage({ id: 'nowa', from: '999@lid', body: 'nowa', timestamp: 20 });
+        let window: unknown[] = [old];
+        const client = fakeClient({ lidToPhone: { '999@lid': '5550100@c.us' } });
+        client.getChats = async () =>
+            [
+                {
+                    id: { _serialized: '999@lid' },
+                    fetchMessages: async () => window,
+                },
+            ] as unknown as Awaited<ReturnType<typeof client.getChats>>;
+
+        const archive = new Archive(testConfig(dir, { messagesPerFile: 100 }), client);
+        await archive.save(old);
+        assert.equal((await archive.backfillRecent(25)).staleCheckpointChats, 0);
+
+        // Tym razem nowej wiadomości nikt nie złapał na żywo, a strona oddaje
+        // samą ją - między nią a checkpointem została historia, po którą
+        // zwykłe nadrabianie już nie sięgnie.
+        window = [fresh];
+
+        const stats = await archive.backfillRecent(25);
+        assert.equal(stats.saved, 1);
+        assert.equal(stats.staleCheckpointChats, 1);
     });
 });
 
@@ -359,6 +452,7 @@ test('zwykłe nadrabianie pomija czat bez folderu, a jawny tryb może go założ
             failedChats: 0,
             newChats: 0,
             updated: 0,
+            staleCheckpointChats: 0,
             complete: true,
         });
         assert.equal(fetchCalls, 0);
@@ -381,6 +475,7 @@ test('zwykłe nadrabianie pomija czat bez folderu, a jawny tryb może go założ
                 failedChats: 0,
                 newChats: 1,
                 updated: 0,
+                staleCheckpointChats: 0,
                 complete: true,
             },
         );
@@ -573,6 +668,7 @@ test('nadrabianie rozwija czaty pojedynczo, gdy zbiorcze getChats jest uszkodzon
                 failedChats: 1,
                 newChats: 1,
                 updated: 0,
+                staleCheckpointChats: 0,
                 complete: false,
             },
         );
@@ -891,6 +987,54 @@ test('wiadomości systemowe nie zaśmiecają archiwum', async () => {
         assert.equal(await archive.save(fakeMessage({ type: 'gp2' })), false);
 
         assert.deepEqual(await listFiles(dir), []);
+    });
+});
+
+test('pusty album nie zostawia wiadomości bez treści, ale jego zdjęcia zostają', async () => {
+    await withTempDir(async (dir) => {
+        const client = fakeClient({ lidToPhone: { '999@lid': '5550100@c.us' } });
+        const archive = new Archive(testConfig(dir, { messagesPerFile: 100 }), client);
+
+        // Tak wygląda album w praktyce: puste opakowanie, a chwilę po nim
+        // każde zdjęcie osobno.
+        assert.equal(
+            await archive.save(
+                fakeMessage({ id: 'album-1', from: '999@lid', type: 'album', timestamp: 10 }),
+            ),
+            false,
+        );
+        assert.equal(
+            await archive.save(
+                fakeMessage({ id: 'zdjecie-1', from: '999@lid', type: 'image', body: 'podpis', timestamp: 11 }),
+            ),
+            true,
+        );
+
+        const state = await readState(dir, '5550100');
+        assert.deepEqual(
+            state.pendingMessages.map((message) => message.type),
+            ['image'],
+        );
+    });
+});
+
+test('album z własnym podpisem nadal trafia do archiwum', async () => {
+    await withTempDir(async (dir) => {
+        const client = fakeClient({ lidToPhone: { '999@lid': '5550100@c.us' } });
+        const archive = new Archive(testConfig(dir, { messagesPerFile: 100 }), client);
+
+        assert.equal(
+            await archive.save(
+                fakeMessage({ id: 'album-2', from: '999@lid', type: 'album', body: 'wakacje' }),
+            ),
+            true,
+        );
+
+        const state = await readState(dir, '5550100');
+        assert.deepEqual(
+            state.pendingMessages.map((message) => message.body),
+            ['wakacje'],
+        );
     });
 });
 

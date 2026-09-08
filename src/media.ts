@@ -57,6 +57,15 @@ const CHAT_WINDOW_MS = 30 * 60 * 1000;
 const FRESH_MESSAGE_MS = 5 * 60 * 1000;
 
 /**
+ * Ile wiadomości pamiętamy w spisie już zgłoszonych porażek.
+ *
+ * Spis istnieje po to, żeby przegląd zaległości nie ogłaszał w kółko tej samej
+ * straty. Limit trzyma go w ryzach w archiwum o dowolnej wielkości; wypadnięcie
+ * najstarszego wpisu kosztuje najwyżej jedną powtórzoną linię.
+ */
+const REPORTED_MESSAGE_LIMIT = 2_000;
+
+/**
  * Ile czekamy w przeglądarce, aż WhatsApp Web skończy ściągać plik.
  *
  * downloadMedia() z biblioteki tylko rozpoczyna pobieranie i natychmiast
@@ -137,6 +146,9 @@ const NOTHING: MediaResult = { path: null, name: null, skipped: null };
 export class MediaDownloader {
     /** Stan czatu w bieżącym oknie czasowym - licznik i ostatni komunikat. */
     private readonly windows = new Map<string, ChatWindow>();
+
+    /** Powód, o którym już powiedzieliśmy przy danej wiadomości. */
+    private readonly reportedMessages = new Map<string, string>();
 
     constructor(private readonly config: Config) {}
 
@@ -366,16 +378,29 @@ export class MediaDownloader {
      * także wtedy, gdy pół dnia później zaczynało się dziać coś zupełnie
      * innego. Teraz powtarzamy się dopiero, gdy zmienia się powód albo gdy
      * mija okno CHAT_WINDOW_MS.
+     *
+     * Okno czasowe pilnuje jednak czatu, a nie pliku - i o to się rozbijało.
+     * Przegląd zaległości wraca co kilka godzin do tej samej wiadomości, więc
+     * plik, który u WhatsAppa wygasł na dobre (ERROR_MISSING), meldował się
+     * w dzienniku przy każdym przebiegu, zawsze tym samym zdaniem. Znany plik
+     * z niezmienionym powodem milczy; nowy albo nowy powód mówi jak dotąd.
      */
     private noteFailure(target: MediaTarget, reason: string, err?: unknown, message?: WaMessage): void {
-        if (err !== undefined) {
+        const messageId = message ? messageKey(message) : null;
+        const alreadyToldAboutThisFile =
+            messageId !== null && this.reportedMessages.get(messageId) === reason;
+
+        if (err !== undefined && !alreadyToldAboutThisFile) {
             log.quiet(err, {
                 stage: 'pobieranie mediów',
                 chat: target.label,
-                messageId: message ? messageKey(message) : null,
+                messageId,
                 messageType: message?.type ?? null,
             });
         }
+
+        if (alreadyToldAboutThisFile) return;
+        if (messageId) this.rememberReported(messageId, reason);
 
         const window = this.windowFor(target);
         if (window.reportedReason === reason) return;
@@ -385,6 +410,20 @@ export class MediaDownloader {
             `Nie udało się pobrać mediów w "${target.label}": ${reason}` +
                 ' - notatka zostaje w archiwum, plik wraca do kolejki ponowień',
         );
+    }
+
+    /** Dopisuje wiadomość do spisu zgłoszonych, wypychając najstarsze wpisy. */
+    private rememberReported(messageId: string, reason: string): void {
+        // Ponowne wstawienie przesuwa wpis na koniec kolejności Map, dzięki
+        // czemu plik, o którym mówimy najczęściej, wypada z niej najpóźniej.
+        this.reportedMessages.delete(messageId);
+        this.reportedMessages.set(messageId, reason);
+
+        while (this.reportedMessages.size > REPORTED_MESSAGE_LIMIT) {
+            const oldest = this.reportedMessages.keys().next().value;
+            if (oldest === undefined) break;
+            this.reportedMessages.delete(oldest);
+        }
     }
 }
 

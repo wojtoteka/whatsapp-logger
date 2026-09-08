@@ -6,6 +6,8 @@ const FILES = {
     delete: 'delete.svg',
     forward: 'forward.svg',
     reply: 'reply.svg',
+    search: 'search.svg',
+    close: 'close.svg',
     arrowBack: 'arrow_back.svg',
     arrowForward: 'arrow_forward.svg',
     done: 'done.svg',

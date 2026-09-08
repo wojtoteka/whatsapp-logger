@@ -1,4 +1,5 @@
-import { fileUrl, toArchivePath } from '@/lib/archiwum';
+import { toArchivePath } from '@/lib/archiwum';
+import { fileUrl } from '@/lib/pliki';
 import {
     formatBytes,
     formatDateTime,

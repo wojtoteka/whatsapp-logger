@@ -19,6 +19,7 @@ export default async function StronaGlowna() {
 
             <ListaCzatow
                 chats={rozmowy}
+                search={{ placeholder: 'Szukaj rozmowy', noun: ['czat', 'czaty', 'czatów'] }}
                 empty={{
                     title: 'Nie ma jeszcze żadnej rozmowy',
                     hint: (

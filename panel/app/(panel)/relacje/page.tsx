@@ -23,6 +23,7 @@ export default async function StronaRelacji() {
 
             <ListaCzatow
                 chats={relacje}
+                search={{ placeholder: 'Szukaj autora', noun: ['autor', 'autorzy', 'autorów'] }}
                 empty={{
                     title: 'Nie ma jeszcze żadnej relacji',
                     hint: (
