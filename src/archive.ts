@@ -24,7 +24,7 @@ import {
     NEXT_LINK_MARKER,
     buildNextLink,
     titleSwaps,
-    typeLabel,
+    quoteBody,
 } from './html';
 import {
     chatIdOf,
@@ -1329,7 +1329,7 @@ export class Archive {
             sender: await this.quotedSender(raw),
             // Cytatu bez treści też nie zamiatamy: sama informacja, że to
             // odpowiedź, jest w rozmowie warta więcej niż jej brak.
-            body: raw.body ?? (raw.type ? typeLabel(raw.type) : '[wiadomość]'),
+            body: quoteBody(raw.body, raw.type),
         };
     }
 
@@ -1353,7 +1353,7 @@ export class Archive {
                     sender = quoted.author ?? quoted.from ?? 'Nieznany';
                 }
             }
-            return { sender, body: quoted.body || typeLabel(quoted.type) };
+            return { sender, body: quoteBody(quoted.body, quoted.type) };
         } catch (err) {
             // Świadomie bez log.quiet(): ta droga zawodzi dla każdej odpowiedzi
             // w całym archiwum, a quiet() przepisuje przy tym cały plik błędów.

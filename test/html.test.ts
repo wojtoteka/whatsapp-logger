@@ -4,6 +4,7 @@ import {
     batchFileName,
     esc,
     generateHtml,
+    looksLikeThumbnail,
     markDeletedInHtml,
     NEXT_LINK_MARKER,
     senderTone,
@@ -174,3 +175,24 @@ test('pusta partia daje poprawny plik, a nie pustą stronę', () => {
 function countOccurrences(text: string, needle: string): number {
     return text.split(needle).length - 1;
 }
+
+test('cytat ze zdjęcia pokazuje nazwę typu, a nie miniaturę zapisaną base64', () => {
+    // Tak wygląda cytat w archiwach zapisanych zanim logger przestał brać
+    // body z modelu media: cała miniatura JPEG w miejscu treści.
+    const thumbnail = `/9j/4AAQSkZJRgABAQAAAQABAAD${'A'.repeat(400)}=`;
+    const html = render([message({ quotedMsg: { sender: 'Ja', body: thumbnail } })]);
+
+    assert.ok(!html.includes(thumbnail.slice(0, 40)));
+    assert.ok(html.includes('[zdjęcie]'));
+});
+
+test('zwykły cytat zostaje w całości', () => {
+    const html = render([message({ quotedMsg: { sender: 'Ja', body: 'będziesz jutro?' } })]);
+
+    assert.ok(html.includes('będziesz jutro?'));
+});
+
+test('długi adres nie zostaje wzięty za miniaturę', () => {
+    assert.equal(looksLikeThumbnail(`https://example.com/${'a'.repeat(200)}`), false);
+    assert.equal(looksLikeThumbnail('a'.repeat(63)), false);
+});

@@ -8,6 +8,7 @@ import {
     isoDateTime,
     isoTime,
     mediaKind,
+    quoteBody,
     senderTone,
     typeName,
 } from '@/lib/format';
@@ -55,7 +56,7 @@ export function Wiadomosc({ message, folder }: Props) {
                             <span>Odpowiedź na</span>
                         </p>
                         <p className="quote-who">{message.quotedMsg.sender}</p>
-                        <p className="quote-body">{message.quotedMsg.body}</p>
+                        <p className="quote-body">{quoteBody(message.quotedMsg.body)}</p>
                     </blockquote>
                 )}
 

@@ -105,3 +105,24 @@ test('wywrócone getQuotedMessage nie zabiera ze sobą całej wiadomości', asyn
         assert.equal(entry?.quotedMsg, null);
     });
 });
+
+test('cytat ze zdjęcia z podpisem bierze podpis, a nie miniaturę', async () => {
+    await withTempDir(async (dir) => {
+        const archive = new Archive(testConfig(dir), fakeClient());
+
+        // Model WhatsApp Weba wkłada do body zdjęcia zakodowaną miniaturę -
+        // bez tego rozróżnienia lądowała ona w archiwum jako treść cytatu.
+        const thumbnail = `/9j/4AAQSkZJRgABAQAAAQABAAD${'A'.repeat(400)}=`;
+
+        await archive.save(
+            fakeMessage({
+                from: '5550100@c.us',
+                body: 'ładne',
+                quoted: { type: 'image', body: thumbnail, fromMe: true },
+            }),
+        );
+
+        const [entry] = archive.pendingMessagesFor('5550100') ?? [];
+        assert.equal(entry?.quotedMsg?.body, '[zdjęcie]');
+    });
+});

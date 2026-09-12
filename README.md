@@ -269,6 +269,8 @@ Cytat jest czytany dwiema drogami. Najpierw publicznym `getQuotedMessage()` z bi
 
 Drugą drogą jest więc odczyt wprost z kolekcji (`src/quoted.ts`): bez serializacji, po `quotedStanzaID` i `quotedParticipant`, z każdym polem osłoniętym osobno. Autora cytatu nazywa już strona Node - tym samym mechanizmem, który nadaje nazwy czatom, więc w cytacie stoi nazwa z książki adresowej, a nie cyfry `@lid`. Gdy cytowanej wiadomości nie ma już w pamięci strony, zostaje sam typ (`[zdjęcie]`, `[film]`) - to nadal więcej niż nic, bo widać, że wiadomość była odpowiedzią.
 
+Cytat ze zdjęcia, filmu czy naklejki nie bierze się z pola `body` modelu: WhatsApp Web trzyma tam zakodowaną base64 miniaturę, a podpis osobno w `caption`. Bez tego rozróżnienia w bąbelku odpowiedzi zamiast treści stała ściana znaków zaczynająca się od `/9j/`. Media dają więc albo swój podpis, albo nazwę typu (`[zdjęcie]`, `[film]`). Ta sama miniatura jest rozpoznawana jeszcze raz przy wyświetlaniu - w panelu i w plikach HTML - bo w rozmowach zapisanych wcześniej leży już ona w archiwum i inaczej zostałaby na ekranie na zawsze.
+
 Zapytania do przeglądarki nie kosztuje żadna zwykła wiadomość: zanim cokolwiek pytamy, sprawdzamy po stronie Node, czy w surowych danych w ogóle jest ślad odpowiedzi.
 
 ## Doręczenie i odczytanie własnych wiadomości

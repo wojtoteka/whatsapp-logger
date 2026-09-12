@@ -97,6 +97,50 @@ export function typeName(type: string): string {
     return TYPE_NAMES[type] ?? type;
 }
 
+/** Krótka etykieta typu, używana tam, gdzie nie ma treści do pokazania. */
+function typeLabel(type: string): string {
+    const name = TYPE_NAMES[type];
+    return name ? `[${name}]` : '[media]';
+}
+
+/** Początki plików widoczne w base64 - po nich poznajemy, co to za miniatura. */
+const THUMBNAIL_HEADS: Array<[string, string]> = [
+    ['/9j/', 'image'], // JPEG
+    ['iVBORw0KGgo', 'image'], // PNG
+    ['R0lGOD', 'image'], // GIF
+    ['UklGR', 'image'], // WEBP
+    ['AAAAI', 'video'], // MP4
+];
+
+function withoutDataPrefix(text: string): string {
+    return text.trim().replace(/^data:[^;,]*;base64,/, '');
+}
+
+/**
+ * Czy to zakodowana base64 miniatura, a nie treść wiadomości.
+ *
+ * Model WhatsApp Weba trzyma w polu body zdjęcia czy filmu samą miniaturę -
+ * przy cytacie potrafiła ona trafić do archiwum jako "treść" odpowiedzi.
+ * Logger już jej tam nie wpuszcza, ale w zapisanych wcześniej rozmowach ona
+ * leży, więc panel rozpoznaje ją także przy wyświetlaniu.
+ */
+export function looksLikeThumbnail(text: string): boolean {
+    const value = withoutDataPrefix(text);
+    if (value.length < 64 || /\s/.test(value)) return false;
+    return /^[A-Za-z0-9+/]+={0,2}$/.test(value);
+}
+
+/** Treść cytatu gotowa do pokazania - nigdy sama miniatura. */
+export function quoteBody(body: string | null | undefined): string {
+    const text = typeof body === 'string' ? body.trim() : '';
+    if (text && !looksLikeThumbnail(text)) return text;
+
+    const head = withoutDataPrefix(text);
+    const kind = THUMBNAIL_HEADS.find(([prefix]) => head.startsWith(prefix))?.[1] ?? null;
+
+    return kind ? typeLabel(kind) : '[wiadomość]';
+}
+
 /** Stały kolor imienia nadawcy, liczony z jego nazwy. */
 export function senderTone(name: string): string {
     let hash = 0;

@@ -171,15 +171,29 @@ export async function readQuotedFromStore(message: WaMessage): Promise<RawQuoted
                     return typeof value === 'boolean' ? value : null;
                 }, null);
 
-                const body = safe(() => {
-                    const value = quoted?.body ?? quoted?.caption ?? quoted?.text;
-                    return typeof value === 'string' && value.length > 0 ? value : null;
-                }, null);
-
                 const type = safe(() => {
                     const value = quoted?.type;
                     return typeof value === 'string' && value.length > 0 ? value : null;
                 }, null);
+
+                const text = (value: any): string | null =>
+                    typeof value === 'string' && value.length > 0 ? value : null;
+
+                // Przy zdjęciu, filmie czy naklejce pole body modelu WhatsApp
+                // Weba trzyma zakodowaną base64 miniaturę, a nie treść - podpis
+                // stoi osobno w caption. Biblioteka robi to samo rozróżnienie
+                // (Message.body = caption dla mediów), tylko my czytamy model
+                // z jej pominięciem i musimy je powtórzyć. Bez tego w cytacie
+                // odpowiedzi na zdjęcie lądowała ściana znaków base64.
+                const media =
+                    (type != null &&
+                        ['image', 'video', 'sticker', 'audio', 'ptt', 'document'].includes(type)) ||
+                    safe(() => quoted?.isMedia === true || quoted?.mediaData != null, false);
+
+                const caption = safe(() => text(quoted?.caption), null);
+                const body = media
+                    ? caption
+                    : safe(() => text(quoted?.body) ?? caption ?? text(quoted?.text), null);
 
                 // Sam identyfikator bez treści to wciąż informacja: wiadomo,
                 // że to odpowiedź, tylko cytatu już nie ma w pamięci strony.

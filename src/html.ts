@@ -107,6 +107,48 @@ export function typeLabel(type: string): string {
     return name ? `[${name}]` : '[media]';
 }
 
+/** Początki plików widoczne w base64 - po nich poznajemy, co to za miniatura. */
+const THUMBNAIL_HEADS: Array<[string, string]> = [
+    ['/9j/', 'image'], // JPEG
+    ['iVBORw0KGgo', 'image'], // PNG
+    ['R0lGOD', 'image'], // GIF
+    ['UklGR', 'image'], // WEBP
+    ['AAAAI', 'video'], // MP4
+];
+
+function withoutDataPrefix(text: string): string {
+    return text.trim().replace(/^data:[^;,]*;base64,/, '');
+}
+
+/**
+ * Czy to zakodowana base64 miniatura, a nie treść wiadomości.
+ *
+ * Model WhatsApp Weba trzyma w polu body zdjęcia czy filmu samą miniaturę -
+ * przy cytacie potrafiła ona trafić do archiwum jako "treść" odpowiedzi
+ * i wyświetlić się w bąbelku jako ściana znaków. Sprawdzenie jest przy
+ * wyświetlaniu, a nie tylko przy zapisie, bo w archiwach zapisanych wcześniej
+ * ta miniatura już leży i inaczej zostałaby na ekranie na zawsze.
+ */
+export function looksLikeThumbnail(text: string): boolean {
+    const value = withoutDataPrefix(text);
+    if (value.length < 64 || /\s/.test(value)) return false;
+    return /^[A-Za-z0-9+/]+={0,2}$/.test(value);
+}
+
+/** Treść cytatu gotowa do pokazania - nigdy sama miniatura. */
+export function quoteBody(body: string | null | undefined, type?: string | null): string {
+    const text = typeof body === 'string' ? body.trim() : '';
+    if (text && !looksLikeThumbnail(text)) return text;
+
+    // Typu w starym archiwum przy cytacie nie ma, ale początek base64 mówi
+    // wprost, czy to było zdjęcie, czy film.
+    const head = withoutDataPrefix(text);
+    const guessed = THUMBNAIL_HEADS.find(([prefix]) => head.startsWith(prefix))?.[1] ?? null;
+    const kind = type && type !== 'chat' ? type : guessed;
+
+    return kind ? typeLabel(kind) : '[wiadomość]';
+}
+
 // ---------------------------------------------------------------------
 //  Daty
 // ---------------------------------------------------------------------
@@ -298,7 +340,7 @@ function renderQuote(msg: ArchivedMessage): string {
     return `<blockquote class="quote">
         <p class="quote-head">${icon('reply')}Odpowiedź na</p>
         <p class="quote-who">${esc(msg.quotedMsg.sender)}</p>
-        <p class="quote-body">${fmt(msg.quotedMsg.body)}</p>
+        <p class="quote-body">${fmt(quoteBody(msg.quotedMsg.body))}</p>
     </blockquote>`;
 }
 
