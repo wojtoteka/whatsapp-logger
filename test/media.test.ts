@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { downloadMediaFromStore, isRecoverableMediaFailure, MediaDownloader } from '../src/media';
 import type { MediaTarget } from '../src/media';
+import { encryptMedia } from '../src/mediaDecrypt';
 import type { WaMessage } from '../src/types';
 import { fakeMessage, testConfig, withTempDir } from './helpers';
 
@@ -319,6 +320,47 @@ test('odmowa serwera mediów trafia do powodu razem z kodem odpowiedzi', async (
 
     assert.equal(result.media, null);
     assert.match(result.why ?? '', /404/);
+});
+
+test('odrzucony przez WhatsApp Web plik pobieramy i odszyfrowujemy sami', async () => {
+    // Błąd z produkcji od jesieni 2026: WhatsApp Web odrzuca odpowiedź
+    // własnego serwera mediów, choć plik i klucz są w porządku.
+    const mediaKey = Buffer.alloc(32, 7).toString('base64');
+    const encrypted = encryptMedia(Buffer.from('zdjęcie'), mediaKey, 'WhatsApp Image Keys');
+    const seen: string[] = [];
+
+    const result = await withFakeStore(
+        {
+            FileReader: fakeFileReader(null),
+            fetch: async (url: string) => {
+                seen.push(url);
+                return { ok: true, status: 200, arrayBuffer: async () => new Uint8Array(encrypted).buffer };
+            },
+            Store: {
+                Msg: {
+                    get: () => ({
+                        id: { _serialized: 'z-plikiem' },
+                        type: 'image',
+                        mimetype: 'image/jpeg',
+                        mediaData: { mediaStage: 'RESOLVED' },
+                        directPath: '/v/t62.7118-24/plik.enc?oh=1',
+                        mediaKey,
+                    }),
+                },
+                DownloadManager: {
+                    downloadAndMaybeDecrypt: async () => {
+                        throw new Error('Unexpected mimetype application/octet-stream for media type image');
+                    },
+                },
+            },
+        },
+        (message) => downloadMediaFromStore(message, { waitForStageMs: 0 }),
+    );
+
+    assert.deepEqual(seen, ['https://mmg.whatsapp.net/v/t62.7118-24/plik.enc?oh=1']);
+    assert.equal(Buffer.from(result.media?.data ?? '', 'base64').toString(), 'zdjęcie');
+    assert.equal(result.media?.mimetype, 'image/jpeg');
+    assert.equal(result.why, null);
 });
 
 test('wiadomość poza pamięcią przeglądarki jest nazwana po imieniu', async () => {

@@ -12,6 +12,7 @@ import { log } from './log';
 import { ensurePageAccess, PAGE_HELPER, pageAccessLine } from './pageStore';
 import type { DownloadedMedia, SkippedMedia, WaMessage } from './types';
 import { ensureDir, sleep } from './util';
+import { downloadAndDecrypt, type MediaKeys } from './mediaDecrypt';
 
 /**
  * Odstępy przed kolejnymi podejściami do jednego pliku.
@@ -126,6 +127,11 @@ export interface StoreDownload {
     stage: string | null;
     /** Krótkie "dlaczego nie" po polsku. Null, gdy plik jest. */
     why: string | null;
+    /**
+     * Klucz i adres pliku, gdy przeglądarka je zna, ale sama nie umiała
+     * pliku pobrać - wtedy pobieramy go i odszyfrowujemy w Node.
+     */
+    keys?: MediaKeys | null;
 }
 
 /** To, co MediaDownloader.fetch() wie po wszystkich podejściach. */
@@ -512,8 +518,9 @@ export async function downloadMediaFromStore(
 
     const waitMs = options.waitForStageMs ?? STAGE_WAIT_MS;
 
+    let result: StoreDownload;
     try {
-        return await page.evaluate(
+        result = await page.evaluate(
             async (
                 wantedIds: string[],
                 stageWaitMs: number,
@@ -743,13 +750,47 @@ export async function downloadMediaFromStore(
                     return fail(`WhatsApp zgłosił błąd pobierania (${stage})`, stage);
                 }
 
-                const download = safe(() => Store.DownloadManager?.downloadAndMaybeDecrypt, null);
-                if (typeof download !== 'function') {
-                    return fail('przeglądarka nie udostępnia DownloadManagera', stage);
-                }
-
                 const directPath = field('directPath');
                 const mediaKey = field('mediaKey');
+
+                // Komplet do pobrania pliku poza przeglądarką. WhatsApp Web
+                // odrzuca dziś odpowiedź własnego serwera mediów ("Unexpected
+                // mimetype application/octet-stream for media type image"),
+                // więc Node musi umieć zrobić to sam - patrz src/mediaDecrypt.ts.
+                const keyBase64 = safe((): string | null => {
+                    if (typeof mediaKey === 'string') return mediaKey;
+                    const bytes =
+                        mediaKey instanceof Uint8Array
+                            ? mediaKey
+                            : mediaKey instanceof ArrayBuffer
+                              ? new Uint8Array(mediaKey)
+                              : null;
+                    if (!bytes) return null;
+                    let binary = '';
+                    for (const byte of bytes) binary += String.fromCharCode(byte);
+                    return win.btoa(binary);
+                }, null);
+                const text = (value: unknown): string | null =>
+                    typeof value === 'string' && value.length > 0 ? value : null;
+                const keys =
+                    keyBase64 && (text(directPath) || text(field('clientUrl')) || text(field('deprecatedMms3Url')))
+                        ? {
+                              directPath: text(directPath),
+                              url: text(field('clientUrl')) ?? text(field('deprecatedMms3Url')),
+                              mediaKey: keyBase64,
+                              type: text(field('type')),
+                              mimetype: text(field('mimetype')),
+                              filename: text(field('filename')),
+                              size: typeof field('size') === 'number' ? field('size') : null,
+                              encFilehash: text(field('encFilehash')),
+                          }
+                        : null;
+
+                const download = safe(() => Store.DownloadManager?.downloadAndMaybeDecrypt, null);
+                if (typeof download !== 'function') {
+                    return { ...fail('przeglądarka nie udostępnia DownloadManagera', stage), keys };
+                }
+
                 if (!directPath || !mediaKey) {
                     // Bez tych dwóch pól nie ma czego odszyfrować, a przeglądarka
                     // nie ma gotowego blobu - plik przepadł po stronie WhatsAppa.
@@ -787,12 +828,14 @@ export async function downloadMediaFromStore(
                         () => String(err?.message ?? err ?? 'bez treści').slice(0, 200),
                         'bez treści',
                     );
-                    return fail(
-                        status
-                            ? `serwer mediów WhatsAppa odpowiedział ${String(status)}`
-                            : `pobieranie z serwera mediów nie doszło do skutku: ${detail}`,
-                        stage,
-                    );
+                    // Odpowiedź z kodem HTTP (404, 410) to wygasły plik - pobranie
+                    // go drugi raz z Node skończyłoby się tym samym.
+                    return status
+                        ? fail(`serwer mediów WhatsAppa odpowiedział ${String(status)}`, stage)
+                        : {
+                              ...fail(`pobieranie z serwera mediów nie doszło do skutku: ${detail}`, stage),
+                              keys,
+                          };
                 }
 
                 let base64: unknown;
@@ -825,6 +868,21 @@ export async function downloadMediaFromStore(
         // kontakt. To jest błąd przeglądarki, a nie odpowiedź WhatsAppa - i ma
         // być tak nazwany, żeby nie udawał powodu niepobrania pliku.
         return { media: null, stage: null, why: `błąd w przeglądarce: ${describeShort(err)}` };
+    }
+
+    if (result.media || !result.keys) return { media: result.media, stage: result.stage, why: result.why };
+
+    // Przeglądarka zna klucz i adres, ale sama pliku nie pobrała. Ściągamy
+    // go z serwera mediów i odszyfrowujemy tutaj.
+    try {
+        const media = await downloadAndDecrypt(result.keys);
+        return { media, stage: result.stage, why: null };
+    } catch (err) {
+        return {
+            media: null,
+            stage: result.stage,
+            why: `${result.why ?? 'przeglądarka nie pobrała pliku'}; pobieranie bezpośrednie: ${describeShort(err)}`,
+        };
     }
 }
 
